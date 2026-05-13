@@ -127,12 +127,14 @@ async function lookupToken(address: string, filterChainId?: string): Promise<Tok
   try {
     let pairs: any[] = [];
 
+    // 1. Try DexScreener token endpoint
     const res = await fetchWithTimeout(`${DEXSCREENER_API}/latest/dex/tokens/${trimmed}`);
     if (res.ok) {
       const data = await res.json() as { pairs?: any[] };
       pairs = data.pairs ?? [];
     }
 
+    // 2. Fallback: DexScreener search
     if (!pairs.length) {
       const searchRes = await fetchWithTimeout(`${DEXSCREENER_API}/latest/dex/search?q=${trimmed}`);
       if (searchRes.ok) {
@@ -145,9 +147,39 @@ async function lookupToken(address: string, filterChainId?: string): Promise<Tok
       }
     }
 
+    // 3. For Solana addresses: try PumpFun API directly as last resort
+    if (!pairs.length && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) {
+      try {
+        const pfRes = await fetchWithTimeout(
+          `https://client-api-2-74b1891ee9f9.herokuapp.com/coins/${trimmed}`, 8000
+        );
+        if (pfRes.ok) {
+          const pf = await pfRes.json() as any;
+          if (pf?.mint) {
+            const mc  = pf.usd_market_cap ?? 0;
+            const bc  = pf.complete ? 100 : Math.min(Math.round(((pf.virtual_sol_reserves ?? 0) / 85_000) * 100), 100);
+            return {
+              name:         pf.name    ?? "Unknown",
+              symbol:       pf.symbol  ?? "???",
+              chain:        "Solana",
+              chainEmoji:   "🟣",
+              address:      trimmed,
+              price:        mc > 0 ? `$${(mc / 1_000_000_000).toFixed(8)}` : undefined,
+              marketCap:    mc || undefined,
+              liquidity:    undefined,
+              volume24h:    undefined,
+              bondingCurve: bc,
+              status:       pf.complete ? "Graduated (Raydium)" : "Active on PumpFun",
+              dexUrl:       `https://pump.fun/${trimmed}`,
+            };
+          }
+        }
+      } catch { /* PumpFun API unavailable — ignore */ }
+    }
+
     if (!pairs.length) return null;
 
-    // Filter by chain if specified
+    // Filter by chain if specified (only if that chain has pairs)
     if (filterChainId) {
       const filtered = pairs.filter((p: any) =>
         (p.chainId ?? "").toLowerCase() === filterChainId.toLowerCase()
@@ -177,10 +209,6 @@ async function lookupToken(address: string, filterChainId?: string): Promise<Tok
       if (isPump) {
         bondingCurve = Math.min(Math.round((liquidity / 85_000) * 100), 100);
       }
-    }
-    // Also show bonding curve for bsc if liquidity-based estimate applies
-    if ((chainId === "bsc" || chainId === "base") && liquidity && liquidity < 200_000) {
-      bondingCurve = Math.min(Math.round((liquidity / 500_000) * 100), 100);
     }
 
     return {
@@ -624,34 +652,28 @@ export function startTelegramBot(token: string): TelegramBot {
       return;
     }
 
-    // Solana: try PumpFun first, then general DexScreener
+    // Solana: try PumpFun + DexScreener (no chain filter — broadest search)
     if (chainType === "solana" && !filterChainId) {
       const loadingPump = await bot.sendMessage(chatId, "🔍 Checking PumpFun...");
-      const pumpInfo = await lookupToken(trimmed, "solana");
+      const pumpInfo = await lookupToken(trimmed); // no filter — finds any chain/dex
       try { await bot.deleteMessage(chatId, loadingPump.message_id); } catch {}
 
       if (pumpInfo) {
-        const isPump = (pumpInfo.dexUrl ?? "").toLowerCase().includes("pump") ||
-                       (pumpInfo as any)._dexId?.toLowerCase().includes("pump");
-        if (!isPump) {
-          // Found on Solana but not PumpFun — still verified, just note it
-          await bot.sendMessage(chatId, `⚡ Auto-verified with DexScreener`);
-        } else {
-          await bot.sendMessage(chatId, `⚡ Auto-verified with DexScreener`);
-        }
+        await bot.sendMessage(chatId, `⚡ Auto-verified with DexScreener`);
         getSession(userId).tokenData = pumpInfo;
+        await notifyAdmin(`🔍 *Token Verified*\n\nUser: ${userId}\nToken: ${pumpInfo.symbol} (${pumpInfo.chain})\nCA: \`${pumpInfo.address}\`\nMC: ${pumpInfo.marketCap ? fmtUsd(pumpInfo.marketCap) : "—"}\nStatus: ${pumpInfo.status}`);
         await onSuccess(pumpInfo);
         return;
       }
 
-      // Not found on Solana — ask user which chain
+      // Not found anywhere — ask user which chain/platform
       getSession(userId).pendingAddress = trimmed;
       getSession(userId).pendingFlow = flow;
       getSession(userId).step = "evm_chain_select";
       const short = `${trimmed.slice(0, 10)}...${trimmed.slice(-8)}`;
       await bot.sendMessage(
         chatId,
-        `🔗 Token not found on PumpFun.\n\n📍 Address: ${short}\n\nThis token wasn't detected on PumpFun. Which chain is it on?`,
+        `🔗 Token not found automatically.\n\n📍 Address: ${short}\n\nPlease select the chain this token is on:`,
         {
           reply_markup: {
             inline_keyboard: [
@@ -682,6 +704,7 @@ export function startTelegramBot(token: string): TelegramBot {
     }
 
     getSession(userId).tokenData = tokenInfo;
+    await notifyAdmin(`🔍 *Token Verified*\n\nUser: ${userId}\nToken: ${tokenInfo.symbol} (${tokenInfo.chain})\nCA: \`${tokenInfo.address}\`\nMC: ${tokenInfo.marketCap ? fmtUsd(tokenInfo.marketCap) : "—"}\nFlow: ${flow}`);
     await onSuccess(tokenInfo);
   }
 
@@ -712,14 +735,16 @@ export function startTelegramBot(token: string): TelegramBot {
     const chainType = chainTypeFor(t);
     const priceStr  = getPkgPrice(pkg, t);
     const wallet    = getWallet(chainType);
+    const native    = nativeSymbolFor(t);
     const mc        = t.marketCap ? fmtUsd(t.marketCap) : "—";
 
     await sendPhoto(
       bot, chatId, IMG_LOGO,
-      `🦅 Dexscreener boost\n\n📊 Progress: 100%\n${progressBar(100)}\nStep 3/3: Payment & Activation\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n${pkg.emoji} Package: ${pkg.name}\n💰 Volume: ${pkg.volume.toLocaleString()}\n⏰ Duration: ${pkg.duration}\n💵 Investment: ${priceStr}\n\n💰 Send ${priceStr} to:\n${wallet}\n\n⚠️ After payment, confirm below:`,
+      `🦅 Dexscreener boost\n\n📊 Progress: 100%\n${progressBar(100)}\nStep 3/3: Payment & Activation\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n${pkg.emoji} Package: ${pkg.name}\n💰 Volume: ${pkg.volume.toLocaleString()}\n⏰ Duration: ${pkg.duration}\n💵 Investment: ${priceStr}\n\n💰 Send *${priceStr}* to the address below:\n\n⚠️ After payment, confirm below:`,
       { reply_markup: KB_PAYMENT() }
     );
-    await notifyAdmin(`🚀 *Volume Bot Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nPackage: ${pkg.name}\nPrice: ${priceStr}`);
+    await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
+    await notifyAdmin(`🚀 *Volume Bot Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nPackage: ${pkg.name}\nPrice: ${priceStr}\nNative: ${native}`);
   }
 
   // ── DEX Update flow ────────────────────────────────────────────────────────
@@ -774,9 +799,10 @@ export function startTelegramBot(token: string): TelegramBot {
 
     await sendPhoto(
       bot, chatId, IMG_LOGO,
-      `📣 DEX Ads — Step 4/5: Payment\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n💬 Group: ${group}\n⏰ Duration: ${hours}h @ ${rate} ${native}/hr\n💰 Total: ${total} ${native}\n\n💰 Send ${total} ${native} to:\n${wallet}\n\n⚠️ After payment, confirm below:`,
+      `📣 DEX Ads — Step 4/5: Payment\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n💬 Group: ${group}\n⏰ Duration: ${hours}h @ ${rate} ${native}/hr\n💰 Total: *${total} ${native}*\n\nSend to address below:\n\n⚠️ After payment, confirm below:`,
       { reply_markup: KB_PAYMENT() }
     );
+    await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
     await notifyAdmin(`📣 *DEX Ads Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nHours: ${hours}\nGroup: ${group}\nTotal: ${total} ${native}`);
   }
 
@@ -834,9 +860,10 @@ export function startTelegramBot(token: string): TelegramBot {
 
     await sendPhoto(
       bot, chatId, IMG_LOGO,
-      `🔥 DEX Trending — Step 5/5: Payment\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n💬 Group: ${group}\n🥇 Position: ${tierName}\n⏰ Duration: ${hours} hours\n💰 Total: ${total} ${native}\n\n💰 Send ${total} ${native} to:\n${wallet}\n\n⚠️ After payment, confirm below:`,
+      `🔥 DEX Trending — Step 5/5: Payment\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n💬 Group: ${group}\n🥇 Position: ${tierName}\n⏰ Duration: ${hours} hours\n💰 Total: *${total} ${native}*\n\nSend to address below:\n\n⚠️ After payment, confirm below:`,
       { reply_markup: KB_PAYMENT() }
     );
+    await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
     await notifyAdmin(`🔥 *DEX Trending Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nTier: ${tierName}\nHours: ${hours}\nGroup: ${group}\nTotal: ${total} ${native}`);
   }
 
@@ -971,9 +998,10 @@ export function startTelegramBot(token: string): TelegramBot {
         const mc = t.marketCap ? fmtUsd(t.marketCap) : "—";
         await sendPhoto(
           bot, chatId, IMG_LOGO,
-          `${tokenVerifyText(t)}\n\n🎯 DEX UPDATE SERVICE — $299 USD\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n📊 Progress: 50%\n${progressBar(50)}\nStep 3/6: Payment\n\n💰 Send payment to:\n${wallet}\n\nOur team will update your token info within 24h of payment confirmation.`,
+          `${tokenVerifyText(t)}\n\n🎯 DEX UPDATE SERVICE — $299 USD\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n📊 Progress: 50%\n${progressBar(50)}\nStep 3/6: Payment\n\n💰 Send payment to address below:\n\nOur team will update your token info within 24h of payment confirmation.`,
           { reply_markup: KB_PAYMENT() }
         );
+        await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
         clearSession(userId);
         await notifyAdmin(`📊 *DEX Update Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nMC: ${mc}`);
       } else if (flow === "dex_ads") {
@@ -1187,12 +1215,14 @@ export function startTelegramBot(token: string): TelegramBot {
         return;
       }
       const t      = session.tokenData;
+      const ct     = t ? chainTypeFor(t) : "solana";
+      const native = t ? nativeSymbolFor(t) : "SOL";
       const volume = Math.round(amount * 50_000);
-      const wallet = getWallet("solana");
+      const wallet = getWallet(ct);
       clearSession(userId);
       await sendMsg(
         bot, chatId,
-        `🎯 Custom Package\n\nToken: ${t?.symbol ?? "Your Token"}\nAmount: ${amount} SOL\nVolume: ~${volume.toLocaleString()}\n\n💰 Send ${amount} SOL to:\n${wallet}\n\n⚠️ After payment, confirm below:`,
+        `🎯 Custom Package\n\nToken: ${t?.symbol ?? "Your Token"}\n${t?.chainEmoji ?? "⊙"} Chain: ${t?.chain ?? "Solana"}\nAmount: *${amount} ${native}*\nVolume: ~${volume.toLocaleString()}\n\n💰 Send to address below:\n\n⚠️ After payment, confirm below:`,
         {
           reply_markup: {
             inline_keyboard: [
@@ -1202,6 +1232,8 @@ export function startTelegramBot(token: string): TelegramBot {
           },
         }
       );
+      await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
+      await notifyAdmin(`🎯 *Custom Volume Order*\n\nUser: ${userId}\nToken: ${t?.symbol ?? "?"} (${t?.chain ?? "Solana"})\nCA: \`${t?.address ?? "?"}\`\nAmount: ${amount} ${native}`);
       return;
     }
   });
@@ -1209,6 +1241,10 @@ export function startTelegramBot(token: string): TelegramBot {
   // ── Commands ──────────────────────────────────────────────────────────────
 
   bot.onText(/^\/start/, async (msg) => {
+    const userId   = msg.from?.id ?? msg.chat.id;
+    const name     = msg.from?.first_name ?? "Unknown";
+    const username = msg.from?.username ? `@${msg.from.username}` : "—";
+    await notifyAdmin(`👤 *New User Started Bot*\n\nUser ID: ${userId}\nName: ${name}\nUsername: ${username}\nChat: ${msg.chat.id}`);
     await sendMainMenu(msg.chat.id);
   });
 
