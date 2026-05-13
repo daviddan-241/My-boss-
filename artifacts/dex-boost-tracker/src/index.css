@@ -1,0 +1,198 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@plugin "@tailwindcss/typography";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-card-border: hsl(var(--card-border));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-popover-border: hsl(var(--popover-border));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-primary-border: var(--primary-border);
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-secondary-border: var(--secondary-border);
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-muted-border: var(--muted-border);
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-accent-border: var(--accent-border);
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-destructive-border: var(--destructive-border);
+
+  --color-chart-1: hsl(var(--chart-1));
+  --color-chart-2: hsl(var(--chart-2));
+  --color-chart-3: hsl(var(--chart-3));
+  --color-chart-4: hsl(var(--chart-4));
+  --color-chart-5: hsl(var(--chart-5));
+
+  --color-sidebar: hsl(var(--sidebar));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --color-sidebar-primary: hsl(var(--sidebar-primary));
+  --color-sidebar-primary-foreground: hsl(var(--sidebar-primary-foreground));
+  --color-sidebar-primary-border: var(--sidebar-primary-border);
+  --color-sidebar-accent: hsl(var(--sidebar-accent));
+  --color-sidebar-accent-foreground: hsl(var(--sidebar-accent-foreground));
+  --color-sidebar-accent-border: var(--sidebar-accent-border);
+  --color-sidebar-ring: hsl(var(--sidebar-ring));
+
+  --font-sans: var(--app-font-sans);
+  --font-serif: var(--app-font-serif);
+  --font-mono: var(--app-font-mono);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* DARK CRYPTO THEME */
+:root {
+  --button-outline: rgba(255,255,255, .10);
+  --badge-outline: rgba(255,255,255, .05);
+  --opaque-button-border-intensity: 9;
+  --elevate-1: rgba(255,255,255, .04);
+  --elevate-2: rgba(255,255,255, .09);
+
+  /* Deep dark navy background */
+  --background: 222 47% 6%;
+  --foreground: 210 40% 96%;
+
+  --border: 215 28% 16%;
+
+  --card: 222 47% 9%;
+  --card-foreground: 210 40% 96%;
+  --card-border: 215 28% 16%;
+
+  --sidebar: 222 47% 7%;
+  --sidebar-foreground: 210 40% 96%;
+  --sidebar-border: 215 28% 16%;
+  --sidebar-primary: 142 70% 45%;
+  --sidebar-primary-foreground: 222 47% 6%;
+  --sidebar-accent: 215 28% 13%;
+  --sidebar-accent-foreground: 210 40% 96%;
+  --sidebar-ring: 142 70% 45%;
+
+  --popover: 222 47% 9%;
+  --popover-foreground: 210 40% 96%;
+  --popover-border: 215 28% 16%;
+
+  /* Neon green primary — DexScreener brand */
+  --primary: 142 70% 45%;
+  --primary-foreground: 222 47% 6%;
+
+  --secondary: 215 28% 13%;
+  --secondary-foreground: 210 40% 96%;
+
+  --muted: 215 28% 13%;
+  --muted-foreground: 215 20% 55%;
+
+  --accent: 215 28% 16%;
+  --accent-foreground: 210 40% 96%;
+
+  --destructive: 0 72% 51%;
+  --destructive-foreground: 0 0% 100%;
+
+  --input: 215 28% 18%;
+  --ring: 142 70% 45%;
+
+  /* Chart colors */
+  --chart-1: 142 70% 45%;
+  --chart-2: 199 89% 48%;
+  --chart-3: 45 93% 58%;
+  --chart-4: 0 72% 51%;
+  --chart-5: 271 70% 64%;
+
+  --app-font-sans: 'Inter', sans-serif;
+  --app-font-serif: Georgia, serif;
+  --app-font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --radius: 0.5rem;
+
+  --shadow-2xs: 0px 1px 2px 0px rgba(0,0,0,0.4);
+  --shadow-xs: 0px 1px 3px 0px rgba(0,0,0,0.4);
+  --shadow-sm: 0px 2px 4px 0px rgba(0,0,0,0.5);
+  --shadow: 0px 4px 8px 0px rgba(0,0,0,0.5);
+  --shadow-md: 0px 6px 12px 0px rgba(0,0,0,0.5);
+  --shadow-lg: 0px 10px 20px 0px rgba(0,0,0,0.6);
+  --shadow-xl: 0px 16px 32px 0px rgba(0,0,0,0.6);
+  --shadow-2xl: 0px 24px 48px 0px rgba(0,0,0,0.7);
+
+  --sidebar-primary-border: hsl(var(--sidebar-primary));
+  --sidebar-primary-border: hsl(from hsl(var(--sidebar-primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --sidebar-accent-border: hsl(var(--sidebar-accent));
+  --sidebar-accent-border: hsl(from hsl(var(--sidebar-accent)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --primary-border: hsl(var(--primary));
+  --primary-border: hsl(from hsl(var(--primary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --secondary-border: hsl(var(--secondary));
+  --secondary-border: hsl(from hsl(var(--secondary)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --muted-border: hsl(var(--muted));
+  --muted-border: hsl(from hsl(var(--muted)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --accent-border: hsl(var(--accent));
+  --accent-border: hsl(from hsl(var(--accent)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+  --destructive-border: hsl(var(--destructive));
+  --destructive-border: hsl(from hsl(var(--destructive)) h s calc(l + var(--opaque-button-border-intensity)) / alpha);
+
+  --tracking-normal: 0em;
+  --spacing: 0.25rem;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply font-sans antialiased bg-background text-foreground;
+  }
+}
+
+/* Glow effects for boost indicators */
+.glow-green {
+  box-shadow: 0 0 12px rgba(34, 197, 94, 0.3);
+}
+
+.glow-gold {
+  box-shadow: 0 0 16px rgba(234, 179, 8, 0.4);
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: hsl(222 47% 9%);
+}
+::-webkit-scrollbar-thumb {
+  background: hsl(215 28% 22%);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(142 70% 45% / 0.6);
+}
+
+@layer utilities {
+  input[type="search"]::-webkit-search-cancel-button {
+    @apply hidden;
+  }
+}

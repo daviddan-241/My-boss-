@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: dex-boost-tracker
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install -g pnpm && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build
+    startCommand: pnpm --filter @workspace/api-server run start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: PAYMENT_WALLET_SOL
+        sync: false
+      - key: PAYMENT_WALLET_EVM
+        sync: false
+      - key: PAYMENT_WALLET_TON
+        sync: false
+      - key: ADMIN_CHAT_ID
+        sync: false
