@@ -3,31 +3,25 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { logger } from "./logger.js";
 
-// In dev and production the server always runs from dist/index.mjs,
-// so ../public always resolves to artifacts/api-server/public/
 const PUBLIC_DIR = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../public"
 );
 
-// Image paths (sent as local files so they always work)
+const IMG_WELCOME = path.join(PUBLIC_DIR, "welcome.jpeg");
+const IMG_LOGO    = path.join(PUBLIC_DIR, "dex-logo.png");
 const IMG_LOCKER  = path.join(PUBLIC_DIR, "supply-locker.png");
 const IMG_BURNER  = path.join(PUBLIC_DIR, "supply-burner.png");
-const IMG_LOGO    = path.join(PUBLIC_DIR, "dex-logo.png");
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 type SessionStep =
   | "idle"
-  // Volume bot
   | "volume_contract" | "volume_package" | "volume_payment" | "custom_amount"
-  // DEX services
   | "dex_update_contract"
   | "dex_ads_contract" | "dex_ads_hours"
   | "dex_trending_contract" | "dex_trending_tier"
-  // Lock Supply
   | "lock_contract" | "lock_percent" | "lock_custom_pct" | "lock_duration" | "lock_custom_dur"
-  // Burn Token
   | "burn_contract" | "burn_percent" | "burn_custom_pct";
 
 interface UserSession {
@@ -104,20 +98,52 @@ function clearSession(userId: number): void {
 // ─── Chain detection ──────────────────────────────────────────────────────────
 
 function detectChain(addr: string): string | null {
-  if (/^0x[0-9a-fA-F]{40}$/.test(addr))         return "evm";
-  if (/^(EQ|UQ)[A-Za-z0-9_-]{46}$/.test(addr))  return "ton";
-  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr)) return "solana";
+  const trimmed = addr.trim();
+  if (/^0x[0-9a-fA-F]{40}$/.test(trimmed))            return "evm";
+  if (/^(EQ|UQ)[A-Za-z0-9_\-]{46}$/.test(trimmed))   return "ton";
+  if (/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(trimmed)) return "solana";
   return null;
 }
 
 // ─── DexScreener lookup ───────────────────────────────────────────────────────
 
-async function lookupToken(address: string): Promise<TokenInfo | null> {
+async function fetchWithTimeout(url: string, timeoutMs = 10000): Promise<Response> {
+  const controller = new AbortController();
+  const id = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(`${DEXSCREENER_API}/latest/dex/tokens/${address}`);
-    if (!res.ok) return null;
-    const data = await res.json() as { pairs?: any[] };
-    const pairs: any[] = data.pairs ?? [];
+    const res = await fetch(url, { signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(id);
+  }
+}
+
+async function lookupToken(address: string): Promise<TokenInfo | null> {
+  const trimmed = address.trim();
+  try {
+    // Primary: token lookup by address
+    let pairs: any[] = [];
+
+    const res = await fetchWithTimeout(`${DEXSCREENER_API}/latest/dex/tokens/${trimmed}`);
+    if (res.ok) {
+      const data = await res.json() as { pairs?: any[] };
+      pairs = data.pairs ?? [];
+    }
+
+    // Fallback: search endpoint if no pairs found
+    if (!pairs.length) {
+      const searchRes = await fetchWithTimeout(`${DEXSCREENER_API}/latest/dex/search?q=${trimmed}`);
+      if (searchRes.ok) {
+        const searchData = await searchRes.json() as { pairs?: any[] };
+        // Only keep pairs that exactly match the token address (base or quote)
+        const all = searchData.pairs ?? [];
+        pairs = all.filter((p: any) =>
+          (p.baseToken?.address ?? "").toLowerCase() === trimmed.toLowerCase() ||
+          (p.quoteToken?.address ?? "").toLowerCase() === trimmed.toLowerCase()
+        );
+      }
+    }
+
     if (!pairs.length) return null;
 
     // Best pair = highest 24h volume
@@ -126,18 +152,18 @@ async function lookupToken(address: string): Promise<TokenInfo | null> {
     const info = CHAIN_MAP[chainId] ?? { label: chainId, emoji: "🌐", native: "?" };
 
     const priceRaw = best.priceUsd ? parseFloat(best.priceUsd) : undefined;
-    const priceStr = priceRaw != null ? `$${priceRaw.toFixed(8)}` : undefined;
-    const marketCap = best.marketCap ?? best.fdv;
-    const liquidity = best.liquidity?.usd;
-    const vol24h = best.volume?.h24;
+    const priceStr = priceRaw != null
+      ? priceRaw < 0.001
+        ? `$${priceRaw.toFixed(8)}`
+        : `$${priceRaw.toFixed(4)}`
+      : undefined;
+    const marketCap  = best.marketCap ?? best.fdv;
+    const liquidity  = best.liquidity?.usd;
+    const vol24h     = best.volume?.h24;
 
-    // Estimate bonding curve for pump.fun tokens (Solana)
-    // pump.fun graduates at ~$85,000 liquidity; we approximate from liq/target
     let bondingCurve: number | undefined;
     if (chainId === "solana" && liquidity) {
-      // Some pairs have bonding curve % in their labels or we estimate
-      const pumpUrl = (best.url ?? "") + (best.baseToken?.address ?? "");
-      const isPump = pumpUrl.toLowerCase().includes("pump") ||
+      const isPump = (best.url ?? "").toLowerCase().includes("pump") ||
                      (best.dexId ?? "").toLowerCase().includes("pump");
       if (isPump) {
         bondingCurve = Math.min(Math.round((liquidity / 85_000) * 100), 100);
@@ -145,28 +171,29 @@ async function lookupToken(address: string): Promise<TokenInfo | null> {
     }
 
     return {
-      name: best.baseToken?.name ?? "Unknown",
-      symbol: best.baseToken?.symbol ?? "???",
-      chain: info.label,
-      chainEmoji: info.emoji,
-      address,
-      price: priceStr,
+      name:         best.baseToken?.name   ?? "Unknown",
+      symbol:       best.baseToken?.symbol ?? "???",
+      chain:        info.label,
+      chainEmoji:   info.emoji,
+      address:      trimmed,
+      price:        priceStr,
       priceRaw,
       marketCap,
       liquidity,
-      volume24h: vol24h,
+      volume24h:    vol24h,
       bondingCurve,
-      status: "Active Trading",
-      dexUrl: best.url,
+      status:       "Active Trading",
+      dexUrl:       best.url,
     };
-  } catch {
+  } catch (err) {
+    logger.warn({ err }, "Token lookup failed");
     return null;
   }
 }
 
 async function fetchBoosts(endpoint: string): Promise<any[]> {
   try {
-    const res = await fetch(`${DEXSCREENER_API}${endpoint}`);
+    const res = await fetchWithTimeout(`${DEXSCREENER_API}${endpoint}`);
     if (!res.ok) return [];
     const data = await res.json() as any;
     return Array.isArray(data) ? data : [];
@@ -195,6 +222,7 @@ function progressBar(pct: number, width = 10): string {
 }
 
 function addrShort(a: string): string {
+  if (a.length <= 16) return a;
   return `${a.slice(0, 8)}...${a.slice(-8)}`;
 }
 
@@ -206,50 +234,49 @@ function getWallet(chainType: string): string {
 
 function chainTypeFor(token: TokenInfo): string {
   const c = token.chain.toLowerCase();
-  if (c.includes("ton")) return "ton";
+  if (c.includes("ton"))                              return "ton";
   if (c.includes("bnb") || c.includes("ethereum") || c.includes("base")) return "evm";
   return "solana";
 }
 
 function nativeSymbolFor(token: TokenInfo): string {
   const c = token.chain.toLowerCase();
-  if (c.includes("ton")) return "TON";
-  if (c.includes("bnb")) return "BNB";
+  if (c.includes("ton"))                  return "TON";
+  if (c.includes("bnb"))                  return "BNB";
   if (c.includes("ethereum") || c.includes("base")) return "ETH";
   return "SOL";
 }
 
 function getPkgPrice(pkg: Package, token: TokenInfo): string {
   const c = token.chain.toLowerCase();
-  if (c.includes("ton")) return `${pkg.tonPrice} TON`;
-  if (c.includes("bnb")) return `${pkg.bnbPrice} BNB`;
-  if (c.includes("ethereum") || c.includes("base")) return `${pkg.ethPrice} ETH`;
+  if (c.includes("ton"))                                return `${pkg.tonPrice} TON`;
+  if (c.includes("bnb"))                               return `${pkg.bnbPrice} BNB`;
+  if (c.includes("ethereum") || c.includes("base"))   return `${pkg.ethPrice} ETH`;
   return `${pkg.solPrice} SOL`;
 }
 
-// ─── Verification result text (reused across flows) ───────────────────────────
+// ─── Token verification result text ──────────────────────────────────────────
 
 function tokenVerifyText(t: TokenInfo): string {
-  const mc   = t.marketCap ? fmtUsd(t.marketCap) : "—";
-  const liq  = t.liquidity  ? fmtUsd(t.liquidity)  : "—";
-  const vol  = t.volume24h  ? fmtVol(t.volume24h)  : "—";
-  const bc   = t.bondingCurve != null ? `${t.bondingCurve}%` : null;
-  const lines = [
+  const mc  = t.marketCap  ? fmtUsd(t.marketCap)  : "—";
+  const vol = t.volume24h  ? fmtVol(t.volume24h)  : "—";
+  const liq = t.liquidity  ? fmtUsd(t.liquidity)  : "—";
+  const bc  = t.bondingCurve != null ? `📊 Bonding Curve: ${t.bondingCurve}%\n` : "";
+  return [
     `✅ *Token Verification Results*\n`,
     `🎯 Token: *${t.symbol}*`,
     `📝 Name: ${t.name}`,
     `${t.chainEmoji} Chain: ${t.chain}`,
     `📍 CA: \`${addrShort(t.address)}\``,
     `💰 Market Cap: ${mc}`,
-    bc ? `📊 Bonding Curve: ${bc}` : null,
+    bc.trim() ? bc.trim() : null,
     `💲 Price: ${t.price ?? "—"}`,
     `📈 24h Volume: ${vol}`,
     liq !== "—" ? `💧 Liquidity: ${liq}` : null,
     `🟢 Status: ${t.status}`,
     `🔗 Source: DexScreener`,
     `\n✅ Token data retrieved successfully!`,
-  ];
-  return lines.filter(Boolean).join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 // ─── Message texts ────────────────────────────────────────────────────────────
@@ -257,63 +284,81 @@ function tokenVerifyText(t: TokenInfo): string {
 function welcomeText(): string {
   return `🦅 *Dexscreener boost*
 
-🚀 *DEX Volume Bot — Multi-Chain Elite Volume Booster*
+🚀 *Volume Bot — Whale Attraction Protocol*
 
 💎 Real Volume • Whale Attraction • Instant DEX Ranking
 
 🌐 *Supported Chains:*
-⊙ Solana  •  Ξ Ethereum  •  ⬡ BNB Chain  •  🔷 Base  •  💎 TON
+⊙ SOL  •  Ξ ETH  •  ⬡ BNB  •  🔷 Base  •  💎 TON
 
-🎯 *Why Whales Choose Volume-Rich Tokens:*
+🎯 *Why Whales Choose Volume\\-Rich Tokens:*
 • Trending tokens get premium attention from big Banks
 • Consistent activity signals project legitimacy
-• DEX algorithms favor high-volume tokens in recommendations`;
+• DEX algorithms favor high\\-volume tokens in recommendations`;
 }
 
 function volumePackagesText(): string {
-  return `🦅 *Dexscreener boost*
+  return `📦 *Premium Volume Packages*
 
-📦 *Premium Volume Packages*
+🔥 *Choose Your Perfect Package:*
 
-💎 *STARTER* — 0.5 SOL / 0.1 BNB|TON / 0.1 ETH
-→ 25,000 Volume • 12h
+💎 *STARTER*
+• ⊙ SOL: 0\\.5 SOL → 25,000 Volume \\(12h\\)
+• ⬡ BNB / 💎 TON: 0\\.1 native → 2,500 Volume \\(12h\\)
+• Ξ ETH / 🔷 Base: 0\\.1 native → 5,000 Volume \\(12h\\)
 
-📦 *BASIC* — 1 SOL / 0.2 BNB|TON / 0.2 ETH
-→ 50,000 Volume • 24h
+📦 *BASIC*
+• ⊙ SOL: 1 SOL → 50,000 Volume \\(24h\\)
+• ⬡ BNB / 💎 TON: 0\\.2 native → 5,000 Volume \\(24h\\)
+• Ξ ETH / 🔷 Base: 0\\.2 native → 10,000 Volume \\(24h\\)
 
-🥉 *BRONZE* — 2.5 SOL / 0.5 BNB|TON / 0.5 ETH
-→ 125,000 Volume • 36h
+🥉 *BRONZE*
+• ⊙ SOL: 2\\.5 SOL → 125,000 Volume \\(36h\\)
+• ⬡ BNB / 💎 TON: 0\\.5 native → 20,000 Volume \\(36h\\)
+• Ξ ETH / 🔷 Base: 0\\.5 native → 25,000 Volume \\(36h\\)
 
-🔥 *PREMIUM* — 5 SOL / 1 BNB|TON|ETH
-→ 250,000 Volume • 48h
+🔥 *PREMIUM*
+• ⊙ SOL: 5 SOL → 250,000 Volume \\(48h\\)
+• ⬡ BNB / 💎 TON / Ξ ETH / 🔷 Base: 1 native → 50,000 Volume \\(48h\\)
 
-💎 *VIP* — 10 SOL / 2 BNB|TON|ETH
-→ 500,000 Volume • 72h
+💎 *VIP*
+• ⊙ SOL: 10 SOL → 500,000 Volume \\(72h\\)
+• ⬡ BNB / 💎 TON / Ξ ETH / 🔷 Base: 2 native → 100,000 Volume \\(72h\\)
 
-🎯 *CUSTOM* — 50,000 volume per native token • Flexible duration`;
+🎯 *CUSTOM \\- Your Amount*
+• 50,000 volume per native token
+• Flexible duration`;
 }
 
 function dexServicesText(): string {
-  return `🦅 *Dexscreener boost*
+  return `🎯 *Professional DEX Services*
 
-🎯 *Professional DEX Services*
+🌐 *All Chains Supported:* ⊙ SOL • Ξ ETH • ⬡ BNB • 🔷 Base • 💎 TON
 
-📊 *DEX UPDATE — $299 USD*
-~3.1677 SOL / ~0.1310 ETH / ~0.4482 BNB
-• Logo • Description • Website • Socials • Banner
+🔥 *Boost Your Token's Visibility:*
+
+📊 *DEX UPDATE \\- $299 USD*
+• \\~3\\.2879 SOL / \\~0\\.1328 ETH / \\~0\\.4468 BNB
+• Update token information
+• Logo, description, links
+• Enhanced visibility
+• Professional profile
 
 📣 *DEX ADS*
-SOL/BNB/TON: 0.8 native/hour (min 3h)
-ETH/Base: 0.4 ETH/hour (min 1h)
-• Premium placement • Featured positioning
+• ⊙ SOL / ⬡ BNB / 💎 TON: 0\\.8 native/hour \\(min 3h\\)
+• Ξ ETH / 🔷 Base: 0\\.4 ETH/hour \\(min 1h\\)
+• Premium ad placement
+• Featured positioning
+• Maximum exposure
 
 🔥 *DEX TRENDING*
-🥉 Top 10: 0.5 native/hour (min 3h)
-🥇 Top 3: 1 native/hour (min 1h)
+• 🥉 Top 10: 0\\.5 native/hour \\(min 3h\\)
+• 🥇 Top 3: 1 native/hour \\(min 1h\\)
 • Guaranteed positions
 
-🎁 *COMBO DEALS*
-Save 20% on multiple services`;
+🎯 *COMBO DEALS*
+• Save 20% on multiple services
+• Package discounts available`;
 }
 
 function helpText(): string {
@@ -323,36 +368,36 @@ function helpText(): string {
 /volume — 📦 View all volume packages
 /latest — 📰 Latest boosted tokens
 /top — 🏆 Top boosted tokens
-/golden — 🌟 Golden Ticker tokens (500+ boosts)
+/golden — 🌟 Golden Ticker tokens \\(500\\+ boosts\\)
 /chains — 🌐 Supported chains info
 /help — ❓ Help guide
 /cancel — ❌ Cancel current session
 
 *Quick Start:*
-1. Tap "🚀 Start Volume Bot"
-2. Paste your token contract address
-3. Choose a package
-4. Send payment → Launch!`;
+1\\. Tap "🚀 Start Volume Bot"
+2\\. Paste your token contract address
+3\\. Choose a package
+4\\. Send payment → Launch\\!`;
 }
 
 function chainsText(): string {
   return `🦅 *Dexscreener boost — Chains*
 
 ⊙ *Solana* — 32–44 Base58 chars
-Ξ *Ethereum* — 0x + 40 hex
-⬡ *BNB Chain* — 0x + 40 hex
-🔷 *Base* — 0x + 40 hex
-💎 *TON* — EQ/UQ + 46 chars`;
+Ξ *Ethereum* — 0x \\+ 40 hex
+⬡ *BNB Chain* — 0x \\+ 40 hex
+🔷 *Base* — 0x \\+ 40 hex
+💎 *TON* — EQ/UQ \\+ 46 chars`;
 }
 
 function formatBoostToken(t: any, rank?: number): string {
   const chainInfo = CHAIN_MAP[t.chainId] ?? { label: t.chainId, emoji: "🌐", native: "?" };
-  const addr = `${(t.tokenAddress ?? "").slice(0, 8)}...${(t.tokenAddress ?? "").slice(-6)}`;
-  const rankStr = rank != null ? `*#${rank}* ` : "";
-  const golden = (t.totalAmount ?? 0) >= 500 ? " 🌟" : "";
-  const amount = (t.amount ?? 0).toLocaleString();
-  const total = (t.totalAmount ?? 0).toLocaleString();
-  const urlLine = t.url ? `[View on DexScreener](${t.url})` : null;
+  const addr      = `${(t.tokenAddress ?? "").slice(0, 8)}...${(t.tokenAddress ?? "").slice(-6)}`;
+  const rankStr   = rank != null ? `*#${rank}* ` : "";
+  const golden    = (t.totalAmount ?? 0) >= 500 ? " 🌟" : "";
+  const amount    = (t.amount ?? 0).toLocaleString();
+  const total     = (t.totalAmount ?? 0).toLocaleString();
+  const urlLine   = t.url ? `[View on DexScreener](${t.url})` : null;
   return [
     `${rankStr}${chainInfo.emoji} \`${addr}\`${golden}`,
     `🔥 Boost: *${amount}* / ${total} total`,
@@ -384,11 +429,11 @@ const KB_BACK_MAIN = (): TelegramBot.InlineKeyboardMarkup => ({
 
 const KB_PACKAGES = (withBack = false): TelegramBot.InlineKeyboardMarkup => ({
   inline_keyboard: [
-    [{ text: "💎 Starter — 0.5 SOL", callback_data: "pkg_starter" },
-     { text: "📦 Basic — 1 SOL",    callback_data: "pkg_basic"   }],
-    [{ text: "🥉 Bronze — 2.5 SOL", callback_data: "pkg_bronze"  },
-     { text: "🔥 Premium — 5 SOL",  callback_data: "pkg_premium" }],
-    [{ text: "💎 VIP — 10 SOL",     callback_data: "pkg_vip"     },
+    [{ text: "💎 Starter - 0.5 SOL", callback_data: "pkg_starter" },
+     { text: "📦 Basic - 1 SOL",    callback_data: "pkg_basic"   }],
+    [{ text: "🥉 Bronze - 2.5 SOL", callback_data: "pkg_bronze"  },
+     { text: "🔥 Premium - 5 SOL",  callback_data: "pkg_premium" }],
+    [{ text: "💎 VIP - 10 SOL",     callback_data: "pkg_vip"     },
      { text: "🎯 Custom Package",   callback_data: "pkg_custom"  }],
     withBack
       ? [{ text: "⬅️ Back to Main", callback_data: "back_main" }]
@@ -398,8 +443,8 @@ const KB_PACKAGES = (withBack = false): TelegramBot.InlineKeyboardMarkup => ({
 
 const KB_LOCK_PCT = (): TelegramBot.InlineKeyboardMarkup => ({
   inline_keyboard: [
-    [{ text: "25%",  callback_data: "lock_pct_25"  }, { text: "50%",  callback_data: "lock_pct_50"  }],
-    [{ text: "75%",  callback_data: "lock_pct_75"  }, { text: "100%", callback_data: "lock_pct_100" }],
+    [{ text: "25%",       callback_data: "lock_pct_25"     }, { text: "50%",  callback_data: "lock_pct_50"  }],
+    [{ text: "75%",       callback_data: "lock_pct_75"     }, { text: "100%", callback_data: "lock_pct_100" }],
     [{ text: "✏️ Custom", callback_data: "lock_pct_custom" }],
     [{ text: "❌ Cancel",  callback_data: "cancel"         }],
   ],
@@ -407,8 +452,8 @@ const KB_LOCK_PCT = (): TelegramBot.InlineKeyboardMarkup => ({
 
 const KB_LOCK_DUR = (): TelegramBot.InlineKeyboardMarkup => ({
   inline_keyboard: [
-    [{ text: "1 Month",  callback_data: "lock_dur_1m"  }, { text: "3 Months", callback_data: "lock_dur_3m"  }],
-    [{ text: "6 Months", callback_data: "lock_dur_6m"  }, { text: "1 Year",   callback_data: "lock_dur_1y"  }],
+    [{ text: "1 Month",   callback_data: "lock_dur_1m"     }, { text: "3 Months", callback_data: "lock_dur_3m" }],
+    [{ text: "6 Months",  callback_data: "lock_dur_6m"     }, { text: "1 Year",   callback_data: "lock_dur_1y" }],
     [{ text: "✏️ Custom", callback_data: "lock_dur_custom" }],
     [{ text: "❌ Cancel",  callback_data: "cancel"         }],
   ],
@@ -416,8 +461,8 @@ const KB_LOCK_DUR = (): TelegramBot.InlineKeyboardMarkup => ({
 
 const KB_BURN_PCT = (): TelegramBot.InlineKeyboardMarkup => ({
   inline_keyboard: [
-    [{ text: "25%",  callback_data: "burn_pct_25"  }, { text: "50%",  callback_data: "burn_pct_50"  }],
-    [{ text: "75%",  callback_data: "burn_pct_75"  }, { text: "100%", callback_data: "burn_pct_100" }],
+    [{ text: "25%",       callback_data: "burn_pct_25"     }, { text: "50%",  callback_data: "burn_pct_50"  }],
+    [{ text: "75%",       callback_data: "burn_pct_75"     }, { text: "100%", callback_data: "burn_pct_100" }],
     [{ text: "✏️ Custom", callback_data: "burn_pct_custom" }],
     [{ text: "❌ Cancel",  callback_data: "cancel"         }],
   ],
@@ -425,14 +470,14 @@ const KB_BURN_PCT = (): TelegramBot.InlineKeyboardMarkup => ({
 
 const KB_DEX_SERVICES = (): TelegramBot.InlineKeyboardMarkup => ({
   inline_keyboard: [
-    [{ text: "📊 DEX Update — $299", callback_data: "dex_update"   },
-     { text: "📣 DEX Ads",          callback_data: "dex_ads"       }],
-    [{ text: "🔥 DEX Trending",     callback_data: "dex_trending"  }],
-    [{ text: "⬅️ Back to Main",     callback_data: "back_main"     }],
+    [{ text: "📊 DEX Update -...", callback_data: "dex_update"  },
+     { text: "📣 DEX Ads",        callback_data: "dex_ads"      }],
+    [{ text: "🔥 DEX Trending",   callback_data: "dex_trending" }],
+    [{ text: "⬅️ Back to Main",   callback_data: "back_main"    }],
   ],
 });
 
-// ─── Photo helper (falls back to text if photo fails) ────────────────────────
+// ─── Photo helper ─────────────────────────────────────────────────────────────
 
 async function sendPhoto(
   bot: TelegramBot,
@@ -442,9 +487,29 @@ async function sendPhoto(
   opts: TelegramBot.SendPhotoOptions = {}
 ): Promise<void> {
   try {
-    await bot.sendPhoto(chatId, photoPath, { caption, parse_mode: "Markdown", ...opts });
+    await bot.sendPhoto(chatId, photoPath, { caption, parse_mode: "MarkdownV2", ...opts });
   } catch {
-    await bot.sendMessage(chatId, caption, { parse_mode: "Markdown", ...opts as any });
+    try {
+      await bot.sendMessage(chatId, caption, { parse_mode: "MarkdownV2", ...(opts as any) });
+    } catch {
+      // strip markdown and send plain
+      const plain = caption.replace(/[_*\[\]()~`>#+\-=|{}.!\\]/g, "");
+      await bot.sendMessage(chatId, plain, opts as any);
+    }
+  }
+}
+
+async function sendMsg(
+  bot: TelegramBot,
+  chatId: number | string,
+  text: string,
+  opts: TelegramBot.SendMessageOptions = {}
+): Promise<TelegramBot.Message> {
+  try {
+    return await bot.sendMessage(chatId, text, { parse_mode: "MarkdownV2", ...opts });
+  } catch {
+    const plain = text.replace(/[_*\[\]()~`>#+\-=|{}.!\\]/g, "");
+    return await bot.sendMessage(chatId, plain, opts);
   }
 }
 
@@ -461,61 +526,61 @@ export function startTelegramBot(token: string): TelegramBot {
 
   logger.info("Telegram bot starting");
 
-  // Register commands
   bot.setMyCommands([
-    { command: "start",  description: "🏠 Open main menu"               },
-    { command: "volume", description: "📦 Volume packages & pricing"    },
-    { command: "latest", description: "📰 Latest boosted tokens"        },
-    { command: "top",    description: "🏆 Top boosted tokens"           },
-    { command: "golden", description: "🌟 Golden Ticker tokens"         },
-    { command: "chains", description: "🌐 Supported chains & info"      },
-    { command: "help",   description: "❓ Help guide"                   },
-    { command: "cancel", description: "❌ Cancel current session"       },
+    { command: "start",  description: "🏠 Open main menu"            },
+    { command: "volume", description: "📦 Volume packages & pricing" },
+    { command: "latest", description: "📰 Latest boosted tokens"     },
+    { command: "top",    description: "🏆 Top boosted tokens"        },
+    { command: "golden", description: "🌟 Golden Ticker tokens"      },
+    { command: "chains", description: "🌐 Supported chains & info"   },
+    { command: "help",   description: "❓ Help guide"                },
+    { command: "cancel", description: "❌ Cancel current session"    },
   ]).catch(() => {});
 
-  // ── Helper: send main menu ────────────────────────────────────────────────
+  // ── Send main menu ────────────────────────────────────────────────────────
   async function sendMainMenu(chatId: number | string): Promise<void> {
     clearSession(Number(chatId));
     try {
-      await bot.sendPhoto(chatId, IMG_LOGO, {
-        caption: welcomeText(),
+      await bot.sendPhoto(chatId, IMG_WELCOME, {
+        caption: `🦅 *Dexscreener boost*\n\n🚀 Volume Bot — Whale Attraction Protocol\n\n💎 Real Volume • Whale Attraction • Instant DEX Ranking\n\n🌐 Supported Chains:\n⊙ SOL  •  Ξ ETH  •  ⬡ BNB  •  🔷 Base  •  💎 TON`,
         parse_mode: "Markdown",
         reply_markup: KB_MAIN(),
       });
     } catch {
-      await bot.sendMessage(chatId, welcomeText(), {
+      await bot.sendMessage(chatId, welcomeText().replace(/\\/g, ""), {
         parse_mode: "Markdown",
         reply_markup: KB_MAIN(),
       });
     }
   }
 
-  // ── Helper: verify token then call next ────────────────────────────────────
+  // ── Verify token then call next ───────────────────────────────────────────
   async function verifyAndContinue(
     chatId: number,
     userId: number,
     address: string,
     onSuccess: (info: TokenInfo) => Promise<void>
   ): Promise<void> {
-    const chainType = detectChain(address);
+    const trimmed = address.trim();
+    const chainType = detectChain(trimmed);
     if (!chainType) {
       await bot.sendMessage(
         chatId,
-        "❌ *Invalid contract address format.*\n\n• Solana: 32–44 Base58 chars\n• EVM: 0x + 40 hex\n• TON: EQ/UQ + 46 chars",
-        { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
+        `❌ *Invalid contract address format\\.*\n\n📋 Supported formats:\n• Solana: 32–44 chars \\(Base58\\)\n• EVM \\(ETH/BSC/Base\\): 0x \\+ 40 hex\n• TON: EQ/UQ \\+ 46 chars`,
+        { parse_mode: "MarkdownV2", reply_markup: KB_CANCEL() }
       );
       return;
     }
 
-    const loading = await bot.sendMessage(chatId, "⏳ *Verifying token on DexScreener...*", { parse_mode: "Markdown" });
-    const tokenInfo = await lookupToken(address);
+    const loading = await bot.sendMessage(chatId, "⏳ Verifying token on DexScreener...");
+    const tokenInfo = await lookupToken(trimmed);
     try { await bot.deleteMessage(chatId, loading.message_id); } catch {}
 
     if (!tokenInfo) {
       await bot.sendMessage(
         chatId,
-        "❌ *Token not found on DexScreener.*\n\nEnsure the token has active trading pairs, then try again.",
-        { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
+        `❌ *Token not found on DexScreener\\.*\n\nMake sure:\n• The contract address is correct\n• The token has active trading pairs\n• The token is listed on DexScreener\n\nThen try again\\.`,
+        { parse_mode: "MarkdownV2", reply_markup: KB_CANCEL() }
       );
       return;
     }
@@ -528,38 +593,26 @@ export function startTelegramBot(token: string): TelegramBot {
 
   async function startVolumeStep1(chatId: number | string, userId: number): Promise<void> {
     getSession(userId).step = "volume_contract";
-    await bot.sendMessage(
-      chatId,
-      `🦅 *Dexscreener boost*
-
-🚀 *Volume Bot — Whale Attraction Protocol*
-
-📊 Progress: 33%
-${progressBar(33)}
-*Step 1/3: Token Verification*
-
-🌐 Supported: ⊙ SOL • Ξ ETH • ⬡ BNB • 🔷 Base • 💎 TON
-
-🔍 Please provide your token contract address:
-⚡ Auto-verified with DexScreener`,
-      { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
-    );
+    try {
+      await bot.sendPhoto(chatId, IMG_LOGO, {
+        caption: `🚀 Volume Bot — Whale Attraction Protocol\n\n📊 Progress: 33%\n${progressBar(33)}\nStep 1/3: Token Verification\n\n🌐 Supported Chains:\n⊙ SOL • Ξ ETH • ⬡ BNB • 🔷 Base • 💎 TON\n\n🔍 Enter Your Token Contract Address:\n\n📋 Supported formats:\n• Solana: 32-44 chars (Base58)\n• EVM (ETH/BSC/Base): 0x + 40 hex\n• TON: EQ/UQ + 46 chars`,
+        parse_mode: "Markdown",
+        reply_markup: KB_CANCEL(),
+      });
+    } catch {
+      await bot.sendMessage(
+        chatId,
+        `🚀 *Volume Bot — Whale Attraction Protocol*\n\n📊 Progress: 33%\n${progressBar(33)}\nStep 1/3: Token Verification\n\n🌐 Supported Chains:\n⊙ SOL • Ξ ETH • ⬡ BNB • 🔷 Base • 💎 TON\n\n🔍 Enter Your Token Contract Address:\n\n📋 Supported formats:\n• Solana: 32-44 chars (Base58)\n• EVM (ETH/BSC/Base): 0x + 40 hex\n• TON: EQ/UQ + 46 chars`,
+        { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
+      );
+    }
   }
 
   async function sendVolumeStep2(chatId: number | string, t: TokenInfo): Promise<void> {
-    const mc  = t.marketCap ? fmtUsd(t.marketCap) : "—";
-    const vol = t.volume24h ? fmtVol(t.volume24h)  : "—";
-    const liq = t.liquidity  ? fmtUsd(t.liquidity)  : "—";
-    const bc  = t.bondingCurve != null ? `\n📊 Bonding Curve: ${t.bondingCurve}%` : "";
+    const verifyTxt = tokenVerifyText(t);
     await bot.sendMessage(
       chatId,
-      `${tokenVerifyText(t)}
-
-📊 Progress: 67%
-${progressBar(67)}
-*Step 2/3: Package Selection*
-
-🎯 Choose your volume package:`,
+      `${verifyTxt}\n\n📊 Progress: 67%\n${progressBar(67)}\n*Step 2/3: Package Selection*\n\n🎯 Choose your volume package:`,
       { parse_mode: "Markdown", reply_markup: KB_PACKAGES() }
     );
   }
@@ -576,23 +629,7 @@ ${progressBar(67)}
 
     await bot.sendMessage(
       chatId,
-      `🦅 *Dexscreener boost*
-
-📊 Progress: 100%
-${progressBar(100)}
-*Step 3/3: Payment & Activation*
-
-${t.chainEmoji} Chain: ${t.chain}
-🎯 Token: *${t.symbol}* (${mc})
-${pkg.emoji} Package: *${pkg.name}*
-💰 Volume: ${pkg.volume.toLocaleString()}
-⏰ Duration: ${pkg.duration}
-💵 Investment: *${priceStr}*
-
-💰 *Send ${priceStr} to:*
-\`${wallet}\`
-
-After sending, tap the button below to launch!`,
+      `🦅 *Dexscreener boost*\n\n📊 Progress: 100%\n${progressBar(100)}\n*Step 3/3: Payment & Activation*\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: *${t.symbol}* (${mc})\n${pkg.emoji} Package: *${pkg.name}*\n💰 Volume: ${pkg.volume.toLocaleString()}\n⏰ Duration: ${pkg.duration}\n💵 Investment: *${priceStr}*\n\n💰 *Send ${priceStr} to:*\n\`${wallet}\`\n\nAfter sending, tap the button below to launch!`,
       {
         parse_mode: "Markdown",
         reply_markup: {
@@ -606,74 +643,113 @@ After sending, tap the button below to launch!`,
     await notifyAdmin(`🚀 *Volume Bot Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nPackage: ${pkg.name}\nPrice: ${priceStr}`);
   }
 
+  // ── DEX Update flow ────────────────────────────────────────────────────────
+
+  async function startDexUpdateStep1(chatId: number | string, userId: number): Promise<void> {
+    getSession(userId).step = "dex_update_contract";
+    try {
+      await bot.sendPhoto(chatId, IMG_LOGO, {
+        caption: `🎯 DEX UPDATE SERVICE\n💰 Price: $299 USD (paid in chain native token)\n\n📊 Progress: 17%\n${progressBar(17)}\nStep 1/6: Token Contract Address\n\n🌐 Supported: ⊙ SOL • Ξ ETH • ⬡ BNB • 🔷 Base • 💎 TON\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n🔍 Please provide your token contract address:\n⚡ Auto-verified with DexScreener`,
+        parse_mode: "Markdown",
+        reply_markup: KB_CANCEL(),
+      });
+    } catch {
+      await bot.sendMessage(
+        chatId,
+        `🎯 *DEX UPDATE SERVICE*\n💰 Price: $299 USD \\(paid in chain native token\\)\n\n📊 Progress: 17%\n${progressBar(17)}\nStep 1/6: Token Contract Address\n\n🌐 Supported: ⊙ SOL • Ξ ETH • ⬡ BNB • 🔷 Base • 💎 TON\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n🔍 Please provide your token contract address:\n⚡ Auto\\-verified with DexScreener`,
+        { parse_mode: "MarkdownV2", reply_markup: KB_CANCEL() }
+      );
+    }
+  }
+
+  // ── DEX Ads flow ──────────────────────────────────────────────────────────
+
+  async function startDexAdsStep1(chatId: number | string, userId: number): Promise<void> {
+    getSession(userId).step = "dex_ads_contract";
+    try {
+      await bot.sendPhoto(chatId, IMG_LOGO, {
+        caption: `📣 DEX Ads Service\n\n📍 Step 1/5: Token Contract Address\n\n✨ Includes: Featured placement • Custom banners • Targeted campaigns\n\n💰 Pricing:\n• ⊙ SOL / ⬡ BNB / 💎 TON: 0.8 native/hour (min 3h)\n• Ξ ETH / 🔷 Base: 0.4 ETH/hour (min 1h)\n\n🔍 Provide your token contract address:\n⚡ Auto-verified with DexScreener`,
+        parse_mode: "Markdown",
+        reply_markup: KB_CANCEL(),
+      });
+    } catch {
+      await bot.sendMessage(
+        chatId,
+        `📣 *DEX Ads Service*\n\n📍 Step 1/5: Token Contract Address\n\n✨ Includes: Featured placement • Custom banners • Targeted campaigns\n\n💰 Pricing:\n• ⊙ SOL / ⬡ BNB / 💎 TON: 0\\.8 native/hour \\(min 3h\\)\n• Ξ ETH / 🔷 Base: 0\\.4 ETH/hour \\(min 1h\\)\n\n🔍 Provide your token contract address:\n⚡ Auto\\-verified with DexScreener`,
+        { parse_mode: "MarkdownV2", reply_markup: KB_CANCEL() }
+      );
+    }
+  }
+
   // ── Lock Supply flow ───────────────────────────────────────────────────────
 
   async function startLockStep1(chatId: number | string, userId: number): Promise<void> {
     getSession(userId).step = "lock_contract";
-    await sendPhoto(
-      bot, chatId, IMG_LOCKER,
-      `🔒 *Lock Supply*
-
-📍 Step 1/3: Token Contract Address
-
-Please provide your token's contract address (CA):
-
-📋 Supported formats:
-• ⊙ Solana: 32–44 Base58 chars
-• Ξ ETH / ⬡ BSC / 🔷 Base: 0x + 40 hex
-• 💎 TON: EQ/UQ + 46 chars`,
-      { reply_markup: KB_CANCEL() }
-    );
+    try {
+      await bot.sendPhoto(chatId, IMG_LOCKER, {
+        caption: `🔒 Lock Supply\n\n📍 Step 1/3: Token Contract Address\n\nPlease provide your token's contract address (CA):\n\n📋 Supported formats:\n• Solana: 32-44 Base58 chars\n• ETH / BSC / Base: 0x + 40 hex\n• TON: EQ/UQ + 46 chars`,
+        parse_mode: "Markdown",
+        reply_markup: KB_CANCEL(),
+      });
+    } catch {
+      await bot.sendMessage(
+        chatId,
+        `🔒 *Lock Supply*\n\n📍 Step 1/3: Token Contract Address\n\nProvide your token's contract address \\(CA\\)`,
+        { parse_mode: "MarkdownV2", reply_markup: KB_CANCEL() }
+      );
+    }
   }
 
   async function sendLockStep2Percent(chatId: number | string, t: TokenInfo): Promise<void> {
     await bot.sendMessage(
       chatId,
-      `${tokenVerifyText(t)}
-
-📍 Step 2/3: Choose the percentage to lock:`,
+      `${tokenVerifyText(t)}\n\n📍 Step 2/3: Choose the percentage to lock:`,
       { parse_mode: "Markdown", reply_markup: KB_LOCK_PCT() }
     );
   }
 
   async function sendLockDuration(chatId: number | string): Promise<void> {
-    await sendPhoto(
-      bot, chatId, IMG_LOCKER,
-      `🗓 *Lock Duration*
-
-📍 Step 2/3: Choose how long the supply will be locked:`,
-      { reply_markup: KB_LOCK_DUR() }
-    );
+    try {
+      await bot.sendPhoto(chatId, IMG_LOCKER, {
+        caption: `🗓 Lock Duration\n\n📍 Step 2/3: Choose how long the supply will be locked:`,
+        parse_mode: "Markdown",
+        reply_markup: KB_LOCK_DUR(),
+      });
+    } catch {
+      await bot.sendMessage(chatId, `🗓 *Lock Duration*\n\n📍 Step 2/3: Choose how long the supply will be locked:`, {
+        parse_mode: "Markdown", reply_markup: KB_LOCK_DUR(),
+      });
+    }
   }
 
   async function sendLockSummary(chatId: number | string, userId: number, t: TokenInfo, pct: number, dur: string): Promise<void> {
     clearSession(userId);
     const wallet = getWallet(chainTypeFor(t));
-    const mc  = t.marketCap ? fmtUsd(t.marketCap) : "—";
-    const liq = t.liquidity  ? fmtUsd(t.liquidity)  : "—";
+    const mc     = t.marketCap ? fmtUsd(t.marketCap) : "—";
+    const liq    = t.liquidity  ? fmtUsd(t.liquidity)  : "—";
 
-    await sendPhoto(
-      bot, chatId, IMG_LOCKER,
-      `🔒 *Lock Summary*
-
-${t.chainEmoji} Chain: ${t.chain}
-🏷 Token: *${t.name}* (${t.symbol})
-📍 CA: \`${addrShort(t.address)}\`
-💰 Market Cap: ${mc}
-💧 Liquidity: ${liq}
-🕐 Lock Duration: ${dur}
-🎯 Target % to Lock: ${pct}%
-
-📍 Step 3/3: Connect your wallet to sign the transaction.`,
-      {
+    try {
+      await bot.sendPhoto(chatId, IMG_LOCKER, {
+        caption: `🔒 Lock Summary\n\n${t.chainEmoji} Chain: ${t.chain}\n🏷 Token: ${t.name} (${t.symbol})\n📍 CA: ${addrShort(t.address)}\n💰 Market Cap: ${mc}\n💧 Liquidity: ${liq}\n🕐 Lock Duration: ${dur}\n🎯 Target % to Lock: ${pct}%\n\n📍 Step 3/3: Connect your wallet to sign the transaction.`,
+        parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             [{ text: "🔗 Connect Wallet", callback_data: "lock_connect_wallet" }],
             [{ text: "⬅️ Back to Main",   callback_data: "back_main"           }],
           ],
         },
-      }
-    );
+      });
+    } catch {
+      await bot.sendMessage(chatId, `🔒 *Lock Summary*\n\n${t.chainEmoji} Chain: ${t.chain}\n🏷 Token: *${t.name}* (${t.symbol})\n📍 CA: \`${addrShort(t.address)}\`\n💰 Market Cap: ${mc}\n💧 Liquidity: ${liq}\n🕐 Lock Duration: ${dur}\n🎯 Percent to Lock: ${pct}%`, {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🔗 Connect Wallet", callback_data: "lock_connect_wallet" }],
+            [{ text: "⬅️ Back to Main",   callback_data: "back_main"           }],
+          ],
+        },
+      });
+    }
     await notifyAdmin(`🔒 *Lock Supply Request*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nPercent: ${pct}%\nDuration: ${dur}`);
   }
 
@@ -681,30 +757,33 @@ ${t.chainEmoji} Chain: ${t.chain}
 
   async function startBurnStep1(chatId: number | string, userId: number): Promise<void> {
     getSession(userId).step = "burn_contract";
-    await sendPhoto(
-      bot, chatId, IMG_BURNER,
-      `🔥 *Burn Token*
-
-📍 Step 1/3: Token Contract Address
-
-Please provide your token's contract address (CA):
-
-📋 Supported formats:
-• ⊙ Solana: 32–44 Base58 chars
-• Ξ ETH / ⬡ BSC / 🔷 Base: 0x + 40 hex
-• 💎 TON: EQ/UQ + 46 chars`,
-      { reply_markup: KB_CANCEL() }
-    );
+    try {
+      await bot.sendPhoto(chatId, IMG_BURNER, {
+        caption: `🔥 Burn Token\n\n📍 Step 1/3: Token Contract Address\n\nPlease provide your token's contract address (CA):\n\n📋 Supported formats:\n• Solana: 32-44 Base58 chars\n• ETH / BSC / Base: 0x + 40 hex\n• TON: EQ/UQ + 46 chars`,
+        parse_mode: "Markdown",
+        reply_markup: KB_CANCEL(),
+      });
+    } catch {
+      await bot.sendMessage(chatId, `🔥 *Burn Token*\n\n📍 Step 1/3: Token Contract Address\n\nProvide your token's contract address (CA)`, {
+        parse_mode: "Markdown", reply_markup: KB_CANCEL(),
+      });
+    }
   }
 
   async function sendBurnStep2Percent(chatId: number | string, t: TokenInfo): Promise<void> {
-    await sendPhoto(
-      bot, chatId, IMG_BURNER,
-      `${tokenVerifyText(t)}
-
-📍 Step 2/3: Choose the percentage to burn:`,
-      { reply_markup: KB_BURN_PCT() }
-    );
+    try {
+      await bot.sendPhoto(chatId, IMG_BURNER, {
+        caption: `${tokenVerifyText(t)}\n\n📍 Step 2/3: Choose the percentage to burn:`,
+        parse_mode: "Markdown",
+        reply_markup: KB_BURN_PCT(),
+      });
+    } catch {
+      await bot.sendMessage(
+        chatId,
+        `${tokenVerifyText(t)}\n\n📍 Step 2/3: Choose the percentage to burn:`,
+        { parse_mode: "Markdown", reply_markup: KB_BURN_PCT() }
+      );
+    }
   }
 
   async function sendBurnSummary(chatId: number | string, userId: number, t: TokenInfo, pct: number): Promise<void> {
@@ -714,30 +793,32 @@ Please provide your token's contract address (CA):
     const mc     = t.marketCap ? fmtUsd(t.marketCap) : "—";
     const fee    = chainTypeFor(t) === "solana" ? "0.5 SOL" : `0.05 ${native}`;
 
-    await sendPhoto(
-      bot, chatId, IMG_BURNER,
-      `🔥 *Burn Summary*
-
-${t.chainEmoji} Chain: ${t.chain}
-🏷 Token: *${t.name}* (${t.symbol})
-📍 CA: \`${addrShort(t.address)}\`
-💰 Market Cap: ${mc}
-🔥 Burn Amount: ${pct}% of supply
-
-📍 Step 3/3: Payment & Confirmation
-🔧 Service Fee: ${fee}
-
-💰 *Send ${fee} to:*
-\`${wallet}\``,
-      {
+    try {
+      await bot.sendPhoto(chatId, IMG_BURNER, {
+        caption: `🔥 Burn Summary\n\n${t.chainEmoji} Chain: ${t.chain}\n🏷 Token: ${t.name} (${t.symbol})\n📍 CA: ${addrShort(t.address)}\n💰 Market Cap: ${mc}\n🔥 Burn Amount: ${pct}% of supply\n\n📍 Step 3/3: Payment & Confirmation\n🔧 Service Fee: ${fee}\n\n💰 Send ${fee} to:\n${wallet}`,
+        parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             [{ text: "✅ Fee Sent — Burn Now!", callback_data: "burn_paid" }],
             [{ text: "❌ Cancel",               callback_data: "cancel"    }],
           ],
         },
-      }
-    );
+      });
+    } catch {
+      await bot.sendMessage(
+        chatId,
+        `🔥 *Burn Summary*\n\n${t.chainEmoji} Chain: ${t.chain}\n🏷 Token: *${t.name}* (${t.symbol})\n📍 CA: \`${addrShort(t.address)}\`\n💰 Market Cap: ${mc}\n🔥 Burn Amount: ${pct}% of supply\n\n💵 Service Fee: ${fee}\n\n💰 *Send ${fee} to:*\n\`${wallet}\``,
+        {
+          parse_mode: "Markdown",
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "✅ Fee Sent — Burn Now!", callback_data: "burn_paid" }],
+              [{ text: "❌ Cancel",               callback_data: "cancel"    }],
+            ],
+          },
+        }
+      );
+    }
     await notifyAdmin(`🔥 *Burn Token Request*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nPercent: ${pct}%`);
   }
 
@@ -745,12 +826,12 @@ ${t.chainEmoji} Chain: ${t.chain}
 
   bot.on("message", async (msg) => {
     if (!msg.text || msg.text.startsWith("/")) return;
-    const chatId = msg.chat.id;
-    const userId = msg.from?.id ?? chatId;
-    const text   = msg.text.trim();
+    const chatId  = msg.chat.id;
+    const userId  = msg.from?.id ?? chatId;
+    const text    = msg.text.trim();
     const session = getSession(userId);
 
-    // ── Contract address steps ──────────────────────────────────────────────
+    // Contract address steps
     if (session.step === "volume_contract") {
       await verifyAndContinue(chatId, userId, text, async (t) => {
         session.step = "volume_package";
@@ -777,21 +858,10 @@ ${t.chainEmoji} Chain: ${t.chain}
 
     if (session.step === "dex_update_contract") {
       await verifyAndContinue(chatId, userId, text, async (t) => {
-        clearSession(userId);
-        const wallet = getWallet("solana");
-        await bot.sendMessage(
-          chatId,
-          `🦅 *DEX Update Service — $299 USD*
-
-${tokenVerifyText(t)}
-
-✨ *Includes:* Logo • Description • Website • Socials • Banner
-
-💰 *Send payment to:*
-\`${wallet}\`
-
-_Our team will update your token info within 24h of payment confirmation._`,
-          {
+        const wallet = getWallet(chainTypeFor(t));
+        try {
+          await bot.sendPhoto(chatId, IMG_LOGO, {
+            caption: `${tokenVerifyText(t)}\n\n🎯 DEX UPDATE SERVICE — $299 USD\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n📊 Progress: 50%\n${progressBar(50)}\nStep 3/6: Payment\n\n💰 Send payment to:\n${wallet}\n\nOur team will update your token info within 24h of payment confirmation.`,
             parse_mode: "Markdown",
             reply_markup: {
               inline_keyboard: [
@@ -799,8 +869,23 @@ _Our team will update your token info within 24h of payment confirmation._`,
                 [{ text: "❌ Cancel",        callback_data: "cancel"       }],
               ],
             },
-          }
-        );
+          });
+        } catch {
+          await bot.sendMessage(
+            chatId,
+            `${tokenVerifyText(t)}\n\n🎯 *DEX Update — $299 USD*\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n💰 *Send payment to:*\n\`${wallet}\``,
+            {
+              parse_mode: "Markdown",
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "✅ Payment Sent", callback_data: "payment_sent" }],
+                  [{ text: "❌ Cancel",        callback_data: "cancel"       }],
+                ],
+              },
+            }
+          );
+        }
+        clearSession(userId);
         await notifyAdmin(`📊 *DEX Update Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\``);
       });
       return;
@@ -809,11 +894,22 @@ _Our team will update your token info within 24h of payment confirmation._`,
     if (session.step === "dex_ads_contract") {
       await verifyAndContinue(chatId, userId, text, async (t) => {
         session.step = "dex_ads_hours";
-        await bot.sendMessage(
-          chatId,
-          `✅ Token: *${t.symbol}* on ${t.chain}\n\n📣 *DEX Ads Service*\n\nHow many hours?\n• SOL/BNB/TON: 0.8/hour (min 3h)\n• ETH/Base: 0.4 ETH/hour (min 1h)\n\n_Reply with a number (e.g. "6"):_`,
-          { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
-        );
+        const rate = (t.chain.toLowerCase().includes("ethereum") || t.chain.toLowerCase().includes("base"))
+          ? "0.4 ETH/hour (min 1h)"
+          : "0.8/hour (min 3h)";
+        try {
+          await bot.sendPhoto(chatId, IMG_LOGO, {
+            caption: `${tokenVerifyText(t)}\n\n📍 Step 2/5: Campaign Duration\n\n⏰ Minimum Duration: 3 hours\n💰 Rate: ${rate}\n\nHow many hours do you want the ad campaign to run?`,
+            parse_mode: "Markdown",
+            reply_markup: KB_CANCEL(),
+          });
+        } catch {
+          await bot.sendMessage(
+            chatId,
+            `✅ Token: *${t.symbol}* on ${t.chain}\n\n📣 *DEX Ads Service*\n\n📍 Step 2/5: Campaign Duration\n\n⏰ Minimum Duration: 3 hours\n💰 Rate: ${rate}\n\nHow many hours do you want the ad campaign to run?`,
+            { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
+          );
+        }
       });
       return;
     }
@@ -839,20 +935,24 @@ _Our team will update your token info within 24h of payment confirmation._`,
       return;
     }
 
-    // ── Hours input for DEX Ads ─────────────────────────────────────────────
+    // Hours input for DEX Ads
     if (session.step === "dex_ads_hours") {
       const hours = parseInt(text, 10);
-      if (isNaN(hours) || hours < 1) {
-        await bot.sendMessage(chatId, "❌ Please enter a valid number (e.g., 3)", { reply_markup: KB_CANCEL() });
+      const t     = session.tokenData!;
+      const isEth = t.chain.toLowerCase().includes("ethereum") || t.chain.toLowerCase().includes("base");
+      const minHours = isEth ? 1 : 3;
+      if (isNaN(hours) || hours < minHours) {
+        await bot.sendMessage(chatId, `❌ Please enter a valid number (minimum ${minHours} hours)`, { reply_markup: KB_CANCEL() });
         return;
       }
-      const t = session.tokenData!;
-      const wallet = getWallet("solana");
-      const cost = (hours * 0.8).toFixed(1);
+      const rate   = isEth ? 0.4 : 0.8;
+      const native = nativeSymbolFor(t);
+      const cost   = (hours * rate).toFixed(1);
+      const wallet = getWallet(chainTypeFor(t));
       clearSession(userId);
       await bot.sendMessage(
         chatId,
-        `📣 *DEX Ads — ${hours}h Campaign*\n\nToken: *${t.symbol}* on ${t.chain}\nDuration: ${hours}h\nCost: ${cost} SOL (or ${cost} BNB/TON | ${(hours * 0.4).toFixed(1)} ETH)\n\n💰 Send to:\n\`${wallet}\``,
+        `📣 *DEX Ads — ${hours}h Campaign*\n\nToken: *${t.symbol}* on ${t.chain}\nDuration: ${hours}h\nCost: ${cost} ${native}\n\n💰 *Send to:*\n\`${wallet}\``,
         {
           parse_mode: "Markdown",
           reply_markup: {
@@ -863,11 +963,11 @@ _Our team will update your token info within 24h of payment confirmation._`,
           },
         }
       );
-      await notifyAdmin(`📣 *DEX Ads Order*\n\nUser: ${userId}\nToken: ${t.symbol}\nHours: ${hours}\nCost: ${cost} SOL`);
+      await notifyAdmin(`📣 *DEX Ads Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nHours: ${hours}\nCost: ${cost} ${native}`);
       return;
     }
 
-    // ── Custom lock percent ─────────────────────────────────────────────────
+    // Custom lock percent
     if (session.step === "lock_custom_pct") {
       const pct = parseFloat(text);
       if (isNaN(pct) || pct <= 0 || pct > 100) {
@@ -880,7 +980,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
       return;
     }
 
-    // ── Custom lock duration ────────────────────────────────────────────────
+    // Custom lock duration
     if (session.step === "lock_custom_dur") {
       if (!text.trim()) {
         await bot.sendMessage(chatId, "❌ Please enter a valid duration (e.g., 2 years, 90 days)", { reply_markup: KB_CANCEL() });
@@ -892,7 +992,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
       return;
     }
 
-    // ── Custom burn percent ─────────────────────────────────────────────────
+    // Custom burn percent
     if (session.step === "burn_custom_pct") {
       const pct = parseFloat(text);
       if (isNaN(pct) || pct <= 0 || pct > 100) {
@@ -904,7 +1004,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
       return;
     }
 
-    // ── Custom volume amount ────────────────────────────────────────────────
+    // Custom volume amount
     if (session.step === "custom_amount") {
       const amount = parseFloat(text);
       if (isNaN(amount) || amount <= 0) {
@@ -917,7 +1017,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
       clearSession(userId);
       await bot.sendMessage(
         chatId,
-        `🎯 *Custom Package*\n\nToken: *${t?.symbol ?? "Your Token"}*\nAmount: ${amount} SOL\nVolume: ~${volume.toLocaleString()}\n\n💰 Send ${amount} SOL to:\n\`${wallet}\``,
+        `🎯 *Custom Package*\n\nToken: *${t?.symbol ?? "Your Token"}*\nAmount: ${amount} SOL\nVolume: ~${volume.toLocaleString()}\n\n💰 *Send ${amount} SOL to:*\n\`${wallet}\``,
         {
           parse_mode: "Markdown",
           reply_markup: {
@@ -931,7 +1031,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
     }
   });
 
-  // ── Commands ───────────────────────────────────────────────────────────────
+  // ── Commands ──────────────────────────────────────────────────────────────
 
   bot.onText(/^\/start/, async (msg) => {
     await sendMainMenu(msg.chat.id);
@@ -939,20 +1039,20 @@ _Our team will update your token info within 24h of payment confirmation._`,
 
   bot.onText(/^\/cancel/, async (msg) => {
     clearSession(msg.from?.id ?? msg.chat.id);
-    await bot.sendMessage(msg.chat.id, "❌ Session cancelled.", { parse_mode: "Markdown" });
+    await bot.sendMessage(msg.chat.id, "❌ Session cancelled.");
     await sendMainMenu(msg.chat.id);
   });
 
-  bot.onText(/^\/help/,   async (msg) => {
-    await bot.sendMessage(msg.chat.id, helpText(), { parse_mode: "Markdown", reply_markup: KB_BACK_MAIN() });
+  bot.onText(/^\/help/, async (msg) => {
+    await bot.sendMessage(msg.chat.id, helpText().replace(/\\/g, ""), { parse_mode: "Markdown", reply_markup: KB_BACK_MAIN() });
   });
 
   bot.onText(/^\/volume/, async (msg) => {
-    await bot.sendMessage(msg.chat.id, volumePackagesText(), { parse_mode: "Markdown", reply_markup: KB_PACKAGES(true) });
+    await bot.sendMessage(msg.chat.id, volumePackagesText().replace(/\\/g, ""), { parse_mode: "Markdown", reply_markup: KB_PACKAGES(true) });
   });
 
   bot.onText(/^\/chains/, async (msg) => {
-    await bot.sendMessage(msg.chat.id, chainsText(), { parse_mode: "Markdown", reply_markup: KB_BACK_MAIN() });
+    await bot.sendMessage(msg.chat.id, chainsText().replace(/\\/g, ""), { parse_mode: "Markdown", reply_markup: KB_BACK_MAIN() });
   });
 
   bot.onText(/^\/latest/, async (msg) => {
@@ -995,7 +1095,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
     }
   });
 
-  // ── Callback queries ───────────────────────────────────────────────────────
+  // ── Callback queries ──────────────────────────────────────────────────────
 
   bot.on("callback_query", async (query) => {
     const chatId = query.message?.chat.id;
@@ -1006,15 +1106,14 @@ _Our team will update your token info within 24h of payment confirmation._`,
     const data    = query.data ?? "";
     const session = getSession(userId);
 
-    // ── Main menu navigation ──────────────────────────────────────────────
     if (data === "back_main" || data === "cancel") {
       clearSession(userId);
-      if (data === "cancel") await bot.sendMessage(chatId, "❌ Cancelled.");
+      if (data === "cancel") await bot.sendMessage(chatId, "❌ Cancelled.").catch(() => {});
       await sendMainMenu(chatId);
       return;
     }
 
-    if (data === "start_volume") { await startVolumeStep1(chatId, userId); return; }
+    if (data === "start_volume")     { await startVolumeStep1(chatId, userId); return; }
 
     if (data === "stop_volume") {
       clearSession(userId);
@@ -1025,26 +1124,26 @@ _Our team will update your token info within 24h of payment confirmation._`,
     }
 
     if (data === "volume_packages") {
-      await bot.sendMessage(chatId, volumePackagesText(), { parse_mode: "Markdown", reply_markup: KB_PACKAGES(true) });
+      await bot.sendMessage(chatId, volumePackagesText().replace(/\\/g, ""), { parse_mode: "Markdown", reply_markup: KB_PACKAGES(true) });
       return;
     }
 
     if (data === "dex_services") {
-      await bot.sendMessage(chatId, dexServicesText(), { parse_mode: "Markdown", reply_markup: KB_DEX_SERVICES() });
+      await bot.sendMessage(chatId, dexServicesText().replace(/\\/g, ""), { parse_mode: "Markdown", reply_markup: KB_DEX_SERVICES() });
       return;
     }
 
-    if (data === "lock_supply") { await startLockStep1(chatId, userId); return; }
-    if (data === "burn_token")  { await startBurnStep1(chatId, userId);  return; }
+    if (data === "lock_supply") { await startLockStep1(chatId, userId);  return; }
+    if (data === "burn_token")  { await startBurnStep1(chatId, userId);   return; }
 
-    // ── Package selection ─────────────────────────────────────────────────
+    // Package selection
     if (data.startsWith("pkg_")) {
       const pkgId = data.replace("pkg_", "");
       if (pkgId === "custom") {
         session.step = "custom_amount";
         await bot.sendMessage(
           chatId,
-          `🎯 *Custom Package*\n\nEnter your desired SOL amount:\n• 50,000 volume per 1 SOL\n\n_e.g., type "3.5" for 175,000 volume_`,
+          `🎯 *Custom Package*\n\nEnter your desired SOL amount:\n• 50,000 volume per 1 SOL\n• Flexible duration\n\n_e.g., type "3.5" for 175,000 volume_`,
           { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
         );
         return;
@@ -1053,7 +1152,6 @@ _Our team will update your token info within 24h of payment confirmation._`,
       if (!pkg) return;
       const t = session.tokenData;
       if (!t) {
-        // From volume_packages page — go to step 1 first
         session.selectedPackage = pkg;
         await startVolumeStep1(chatId, userId);
         return;
@@ -1062,7 +1160,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
       return;
     }
 
-    // ── Lock Supply callbacks ─────────────────────────────────────────────
+    // Lock Supply callbacks
     if (data.startsWith("lock_pct_")) {
       const raw = data.replace("lock_pct_", "");
       if (raw === "custom") {
@@ -1095,7 +1193,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
       const wallet = getWallet("solana");
       await bot.sendMessage(
         chatId,
-        `🔗 *Connect Your Wallet*\n\n📍 Step 3/3: Payment\n\nTo execute the lock transaction, send a service fee to cover gas and our smart contract:\n\n💵 Fee: 0.1 SOL\n💰 *Send to:*\n\`${wallet}\`\n\n_After payment, our system will process your lock within 10 minutes._`,
+        `🔗 *Connect Your Wallet*\n\n📍 Step 3/3: Payment\n\n💵 Fee: 0.1 SOL\n💰 *Send to:*\n\`${wallet}\`\n\n_After payment, your lock will be processed within 10 minutes._`,
         {
           parse_mode: "Markdown",
           reply_markup: {
@@ -1109,7 +1207,7 @@ _Our team will update your token info within 24h of payment confirmation._`,
       return;
     }
 
-    // ── Burn Token callbacks ──────────────────────────────────────────────
+    // Burn Token callbacks
     if (data.startsWith("burn_pct_")) {
       const raw = data.replace("burn_pct_", "");
       if (raw === "custom") {
@@ -1124,70 +1222,54 @@ _Our team will update your token info within 24h of payment confirmation._`,
       return;
     }
 
-    // ── DEX service entry points ──────────────────────────────────────────
-    if (data === "dex_update") {
-      session.step = "dex_update_contract";
-      await bot.sendMessage(
-        chatId,
-        `🎯 *DEX UPDATE SERVICE*\n💰 Price: $299 USD (paid in chain native token)\n\n📊 Progress: 17%\n${progressBar(17)}\nStep 1/6: Token Contract Address\n\n🌐 Supported: ⊙ SOL • Ξ ETH • ⬡ BNB • 🔷 Base • 💎 TON\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n🔍 Please provide your token contract address:\n⚡ Auto-verified with DexScreener`,
-        { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
-      );
-      return;
-    }
-
-    if (data === "dex_ads") {
-      session.step = "dex_ads_contract";
-      await bot.sendMessage(
-        chatId,
-        `📣 *DEX Ads Service*\n\n💰 SOL/BNB/TON: 0.8 native/hour (min 3h)\n💰 ETH/Base: 0.4 ETH/hour (min 1h)\n\n🔍 Please provide your token contract address:\n⚡ Auto-verified with DexScreener`,
-        { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
-      );
-      return;
-    }
+    // DEX service entry points
+    if (data === "dex_update")   { await startDexUpdateStep1(chatId, userId); return; }
+    if (data === "dex_ads")      { await startDexAdsStep1(chatId, userId);    return; }
 
     if (data === "dex_trending") {
-      session.step = "dex_trending_contract";
+      getSession(userId).step = "dex_trending_contract";
       await bot.sendMessage(
         chatId,
-        `🔥 *DEX Trending Service*\n\n🥉 Top 10: 0.5 native/hour (min 3h)\n🥇 Top 3: 1 native/hour (min 1h)\n\n🔍 Please provide your token contract address:\n⚡ Auto-verified with DexScreener`,
+        `🔥 *DEX Trending Service*\n\n🥉 Top 10: 0.5 native/hour (min 3h)\n🥇 Top 3: 1 native/hour (min 1h)\n• Guaranteed positions\n\n🔍 Please provide your token contract address:\n⚡ Auto-verified with DexScreener`,
         { parse_mode: "Markdown", reply_markup: KB_CANCEL() }
       );
       return;
     }
 
-    // ── Trending tier ─────────────────────────────────────────────────────
+    // Trending tier
     if (data === "trending_top10" || data === "trending_top3") {
-      const t    = session.tokenData!;
-      const tier = data === "trending_top10" ? "Top 10" : "Top 3";
-      const rate = data === "trending_top10" ? "0.5" : "1";
-      const wallet = getWallet("solana");
+      const t      = session.tokenData!;
+      const tier   = data === "trending_top10" ? "Top 10" : "Top 3";
+      const rate   = data === "trending_top10" ? 0.5 : 1;
+      const minH   = data === "trending_top10" ? 3 : 1;
+      const native = nativeSymbolFor(t);
+      const wallet = getWallet(chainTypeFor(t));
       clearSession(userId);
       await bot.sendMessage(
         chatId,
-        `🔥 *DEX Trending — ${tier}*\n\nToken: *${t.symbol}* on ${t.chain}\nRate: ${rate} native/hour (min 3h)\n\n💰 Send payment to:\n\`${wallet}\`\n\n*Guaranteed ${tier} position!*`,
+        `🔥 *DEX Trending — ${tier}*\n\nToken: *${t.symbol}* on ${t.chain}\nTier: ${tier}\nRate: ${rate} ${native}/hour\nMinimum: ${minH}h\n\n💰 *Send to:*\n\`${wallet}\`\n\nReply with how many hours you want:`,
         {
           parse_mode: "Markdown",
           reply_markup: {
             inline_keyboard: [
-              [{ text: "✅ Payment Sent — Launch!", callback_data: "payment_sent" }],
-              [{ text: "❌ Cancel", callback_data: "cancel" }],
+              [{ text: "✅ Payment Sent", callback_data: "payment_sent" }],
+              [{ text: "❌ Cancel",        callback_data: "cancel"       }],
             ],
           },
         }
       );
-      await notifyAdmin(`🔥 *DEX Trending Order*\n\nUser: ${userId}\nToken: ${t.symbol}\nTier: ${tier}`);
+      await notifyAdmin(`🔥 *DEX Trending Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nTier: ${tier}\nRate: ${rate} ${native}/h`);
       return;
     }
 
-    // ── Payment confirmations ─────────────────────────────────────────────
+    // Payment confirmed
     if (data === "payment_sent" || data === "burn_paid") {
       clearSession(userId);
       await bot.sendMessage(
         chatId,
-        `⏳ *Hold On...*\n\nWe've received your payment notification and are now confirming your order.\n\nYou will be notified once your order is confirmed ✅\n\n_Typical confirmation time: 30–60 minutes_`,
+        `✅ *Payment Received!*\n\nThank you! Your order has been submitted and our team has been notified.\n\n⏰ Processing time: within 1–24 hours depending on the service.\n\n💬 Contact support if you have questions.`,
         { parse_mode: "Markdown", reply_markup: KB_BACK_MAIN() }
       );
-      await notifyAdmin(`💰 *Payment Notification*\n\nUser: ${userId}\nAction: ${data}`);
       return;
     }
   });
@@ -1196,6 +1278,5 @@ _Our team will update your token info within 24h of payment confirmation._`,
     logger.error({ err }, "Telegram polling error");
   });
 
-  logger.info("Telegram bot started successfully");
   return bot;
 }
