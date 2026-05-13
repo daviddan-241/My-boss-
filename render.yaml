@@ -1,23 +1,24 @@
 services:
   - type: web
-    name: dex-boost-tracker
+    name: dexscreener-boost-bot
     env: node
     region: oregon
     plan: free
-    buildCommand: npm install -g pnpm && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build
-    startCommand: pnpm --filter @workspace/api-server run start
+    buildCommand: npm install -g pnpm@10.26.1 && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build
+    startCommand: node --enable-source-maps artifacts/api-server/dist/index.mjs
+    healthCheckPath: /api/healthz
     envVars:
       - key: NODE_ENV
         value: production
-      - key: PORT
-        value: 10000
+      - key: NODE_VERSION
+        value: "20"
       - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ADMIN_CHAT_ID
         sync: false
       - key: PAYMENT_WALLET_SOL
         sync: false
       - key: PAYMENT_WALLET_EVM
         sync: false
       - key: PAYMENT_WALLET_TON
-        sync: false
-      - key: ADMIN_CHAT_ID
         sync: false
