@@ -4,7 +4,7 @@ services:
     env: node
     region: oregon
     plan: free
-    buildCommand: npm install -g pnpm@10.26.1 && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build
+    buildCommand: npm install -g pnpm@10.26.1 && pnpm install --frozen-lockfile && pnpm --filter @workspace/dex-boost-tracker run build && pnpm --filter @workspace/api-server run build
     startCommand: node --enable-source-maps artifacts/api-server/dist/index.mjs
     healthCheckPath: /api/healthz
     envVars:
@@ -12,6 +12,10 @@ services:
         value: production
       - key: NODE_VERSION
         value: "20"
+      - key: BASE_PATH
+        value: /
+      - key: PORT
+        value: "10000"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       - key: ADMIN_CHAT_ID
