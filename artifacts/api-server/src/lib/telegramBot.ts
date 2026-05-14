@@ -71,11 +71,11 @@ interface Package {
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const PACKAGES: Package[] = [
-  { id: "starter", name: "STARTER", emoji: "💎", solPrice: 0.5, bnbPrice: 0.1, ethPrice: 0.1, tonPrice: 0.1, volume: 25_000,  duration: "12h" },
-  { id: "basic",   name: "BASIC",   emoji: "📦", solPrice: 1,   bnbPrice: 0.2, ethPrice: 0.2, tonPrice: 0.2, volume: 50_000,  duration: "24h" },
-  { id: "bronze",  name: "BRONZE",  emoji: "🥉", solPrice: 2.5, bnbPrice: 0.5, ethPrice: 0.5, tonPrice: 0.5, volume: 125_000, duration: "36h" },
-  { id: "premium", name: "PREMIUM", emoji: "🔥", solPrice: 5,   bnbPrice: 1,   ethPrice: 1,   tonPrice: 1,   volume: 250_000, duration: "48h" },
-  { id: "vip",     name: "VIP",     emoji: "💎", solPrice: 10,  bnbPrice: 2,   ethPrice: 2,   tonPrice: 2,   volume: 500_000, duration: "72h" },
+  { id: "starter", name: "STARTER", emoji: "💎", solPrice: 0.5, bnbPrice: 0.1, ethPrice: 0.1, tonPrice: 10,  volume: 25_000,  duration: "12h" },
+  { id: "basic",   name: "BASIC",   emoji: "📦", solPrice: 1,   bnbPrice: 0.2, ethPrice: 0.2, tonPrice: 20,  volume: 50_000,  duration: "24h" },
+  { id: "bronze",  name: "BRONZE",  emoji: "🥉", solPrice: 2.5, bnbPrice: 0.5, ethPrice: 0.5, tonPrice: 50,  volume: 125_000, duration: "36h" },
+  { id: "premium", name: "PREMIUM", emoji: "🔥", solPrice: 5,   bnbPrice: 1,   ethPrice: 1,   tonPrice: 100, volume: 250_000, duration: "48h" },
+  { id: "vip",     name: "VIP",     emoji: "💎", solPrice: 10,  bnbPrice: 2,   ethPrice: 2,   tonPrice: 200, volume: 500_000, duration: "72h" },
 ];
 
 const CHAIN_MAP: Record<string, { label: string; emoji: string; native: string }> = {
@@ -388,26 +388,31 @@ function volumePackagesText(): string {
 
 💎 STARTER
 • ⊙ SOL: 0.5 SOL → 25,000 Volume (12h)
-• ⬡ BNB / 💎 TON: 0.1 native → 2,500 Volume (12h)
-• Ξ ETH / 🔷 Base: 0.1 native → 5,000 Volume (12h)
+• ⬡ BNB: 0.1 BNB → 2,500 Volume (12h)
+• Ξ ETH / 🔷 Base: 0.1 ETH → 5,000 Volume (12h)
+• 💎 TON: 10 TON → 25,000 Volume (12h)
 
 📦 BASIC
 • ⊙ SOL: 1 SOL → 50,000 Volume (24h)
-• ⬡ BNB / 💎 TON: 0.2 native → 5,000 Volume (24h)
-• Ξ ETH / 🔷 Base: 0.2 native → 10,000 Volume (24h)
+• ⬡ BNB: 0.2 BNB → 5,000 Volume (24h)
+• Ξ ETH / 🔷 Base: 0.2 ETH → 10,000 Volume (24h)
+• 💎 TON: 20 TON → 50,000 Volume (24h)
 
 🥉 BRONZE
 • ⊙ SOL: 2.5 SOL → 125,000 Volume (36h)
-• ⬡ BNB / 💎 TON: 0.5 native → 20,000 Volume (36h)
-• Ξ ETH / 🔷 Base: 0.5 native → 25,000 Volume (36h)
+• ⬡ BNB: 0.5 BNB → 20,000 Volume (36h)
+• Ξ ETH / 🔷 Base: 0.5 ETH → 25,000 Volume (36h)
+• 💎 TON: 50 TON → 125,000 Volume (36h)
 
 🔥 PREMIUM
 • ⊙ SOL: 5 SOL → 250,000 Volume (48h)
-• ⬡ BNB / 💎 TON / Ξ ETH / 🔷 Base: 1 native → 50,000 Volume (48h)
+• ⬡ BNB / Ξ ETH / 🔷 Base: 1 native → 50,000 Volume (48h)
+• 💎 TON: 100 TON → 250,000 Volume (48h)
 
 💎 VIP
 • ⊙ SOL: 10 SOL → 500,000 Volume (72h)
-• ⬡ BNB / 💎 TON / Ξ ETH / 🔷 Base: 2 native → 100,000 Volume (72h)
+• ⬡ BNB / Ξ ETH / 🔷 Base: 2 native → 100,000 Volume (72h)
+• 💎 TON: 200 TON → 500,000 Volume (72h)
 
 🎯 CUSTOM - Your Amount
 • 50,000 volume per native token
@@ -518,19 +523,22 @@ const KB_BACK_MAIN = (): TelegramBot.InlineKeyboardMarkup => ({
   inline_keyboard: [[{ text: "⬅️ Back to Main", callback_data: "back_main" }]],
 });
 
-const KB_PACKAGES = (withBack = false): TelegramBot.InlineKeyboardMarkup => ({
-  inline_keyboard: [
-    [{ text: "💎 Starter - 0.5 SOL", callback_data: "pkg_starter" },
-     { text: "📦 Basic - 1 SOL",    callback_data: "pkg_basic"   }],
-    [{ text: "🥉 Bronze - 2.5 SOL", callback_data: "pkg_bronze"  },
-     { text: "🔥 Premium - 5 SOL",  callback_data: "pkg_premium" }],
-    [{ text: "💎 VIP - 10 SOL",     callback_data: "pkg_vip"     },
-     { text: "🎯 Custom Package",   callback_data: "pkg_custom"  }],
-    withBack
-      ? [{ text: "⬅️ Back to Main", callback_data: "back_main" }]
-      : [{ text: "❌ Cancel",        callback_data: "cancel"    }],
-  ],
-});
+const KB_PACKAGES = (withBack = false, token?: TokenInfo): TelegramBot.InlineKeyboardMarkup => {
+  const p = (pkg: Package) => token ? getPkgPrice(pkg, token) : `${pkg.solPrice} SOL`;
+  return {
+    inline_keyboard: [
+      [{ text: `💎 Starter - ${p(PACKAGES[0])}`,  callback_data: "pkg_starter" },
+       { text: `📦 Basic - ${p(PACKAGES[1])}`,     callback_data: "pkg_basic"   }],
+      [{ text: `🥉 Bronze - ${p(PACKAGES[2])}`,    callback_data: "pkg_bronze"  },
+       { text: `🔥 Premium - ${p(PACKAGES[3])}`,   callback_data: "pkg_premium" }],
+      [{ text: `💎 VIP - ${p(PACKAGES[4])}`,       callback_data: "pkg_vip"     },
+       { text: "🎯 Custom Package",                 callback_data: "pkg_custom"  }],
+      withBack
+        ? [{ text: "⬅️ Back to Main", callback_data: "back_main" }]
+        : [{ text: "❌ Cancel",        callback_data: "cancel"    }],
+    ],
+  };
+};
 
 const KB_LOCK_PCT = (): TelegramBot.InlineKeyboardMarkup => ({
   inline_keyboard: [
@@ -829,7 +837,7 @@ export function startTelegramBot(token: string): TelegramBot {
     await sendMsg(
       bot, chatId,
       `${verifyTxt}\n\n📊 Progress: 67%\n${progressBar(67)}\nStep 2/3: Package Selection\n\n🎯 Choose your volume package:`,
-      { reply_markup: KB_PACKAGES() }
+      { reply_markup: KB_PACKAGES(false, t) }
     );
   }
 
