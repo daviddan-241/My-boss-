@@ -1,7 +1,7 @@
 import { ExternalLink, Twitter, Send, Globe, MessageCircle } from "lucide-react";
 
 interface Link {
-  type: string;
+  type?: string;
   label: string;
   url: string;
 }

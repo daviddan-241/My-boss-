@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "hello": "tsx ./src/hello.ts",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "smoke": "tsx ../tools/smoke-lookup.ts",
+    "smoke-payments": "tsx ../tools/smoke-payments.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",

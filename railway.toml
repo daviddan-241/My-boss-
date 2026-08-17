@@ -1,0 +1,24 @@
+# Railway — always-on from the Hobby plan ($5/mo, no sleep).
+# Push the repo (or `railway up`), and Railway auto-detects the Dockerfile.
+# Minimal explicit config for clarity:
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+# Crash-loop safety: ALWAYS restarts the container (ON_FAILURE is the default).
+restartPolicyType = "ALWAYS"
+# Health check path must return 200 (see /api/healthz and /api/health/bot).
+healthcheckPath = "/api/healthz"
+healthcheckTimeout = 120
+
+# Env vars — set in the Railway dashboard (or `railway variables`):
+#   Required:   TELEGRAM_BOT_TOKEN
+#   Recommended: ADMIN_CHAT_ID
+#   Optional:   DATABASE_URL (Railway Postgres plugin — paste DATABASE_PUBLIC_URL
+#               or the internal URL), WEBHOOK_URL (https://<app>.up.railway.app),
+#               WEBHOOK_SECRET_PATH, WEBHOOK_SECRET_TOKEN,
+#               KEEPALIVE_URL, BIRDEYE_API_KEY, COINGECKO_API_KEY, MORALIS_API_KEY
+#               PORT is injected by the Dockerfile default (8080); Railway sets
+#               PORT itself, which wins over the image default.

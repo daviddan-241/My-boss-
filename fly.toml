@@ -1,0 +1,44 @@
+# Fly.io — pay-as-you-go (this app fits the shared-cpu-1x ~$2–3/mo tier).
+# Deploy:  fly launch --no-deploy && fly deploy
+# The machine is configured to NEVER auto-stop, so the bot stays alive.
+
+app = "dex-boost-bot"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PORT = "8080"
+  # Required:  fly secrets set TELEGRAM_BOT_TOKEN=...
+  # Recommended: fly secrets set ADMIN_CHAT_ID=...
+  # Optional: fly secrets set DATABASE_URL=... WEBHOOK_URL=https://<app>.fly.dev \
+  #           WEBHOOK_SECRET_PATH=telegram WEBHOOK_SECRET_TOKEN=... \
+  #           BIRDEYE_API_KEY=... COINGECKO_API_KEY=... MORALIS_API_KEY=...
+
+[[services]]
+  protocol = "tcp"
+  internal_port = 8080
+  # Always-on: keep 1 machine running and never auto-stop it.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    handlers = ["http"]
+    force_https = true
+    port = 443
+
+  [[services.http_checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/api/healthz"
+
+  [[services.http_checks]]
+    interval = "60s"
+    timeout = "5s"
+    grace_period = "15s"
+    method = "GET"
+    path = "/api/health/bot"

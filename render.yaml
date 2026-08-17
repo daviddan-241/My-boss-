@@ -1,10 +1,25 @@
+# Render.com — DexBoost (Telegram bot + token growth services)
+# ---------------------------------------------------------------------------
+# NOTE: the FREE plan sleeps after ~15 min without traffic. The user is
+# keeping the bot awake with an external UptimeRobot monitor pinging
+# /api/healthz every 5 minutes — that's the intended pairing for this file.
+#
+# How the sleep/wake cycle is handled:
+#   - On wake, the payment watcher immediately runs a catch-up tick, so a
+#     deposit made while asleep is detected within one poll after wake.
+#   - Orders persist in Postgres (DATABASE_URL — use a FREE Neon database;
+#     Render's own free Postgres expires after 30 days) or, without it, in a
+#     JSON file under ./data (survives restarts, NOT deploys).
+#   - Expect ~20-60s cold-start latency on wake; that's inherent to free.
+#   - For $7/mo, change `plan` to `starter` and drop the UptimeRobot crutch.
+
 services:
   - type: web
     name: dexscreener-boost-bot
     env: node
     region: oregon
-    plan: free
-    buildCommand: npm install -g pnpm@10.26.1 && pnpm install --frozen-lockfile && pnpm --filter @workspace/dex-boost-tracker run build && pnpm --filter @workspace/api-server run build
+    plan: free               # ← free tier + external cron (UptimeRobot)
+    buildCommand: npm install -g pnpm@10.26.1 && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build
     startCommand: node --enable-source-maps artifacts/api-server/dist/index.mjs
     healthCheckPath: /api/healthz
     envVars:
@@ -12,17 +27,67 @@ services:
         value: production
       - key: NODE_VERSION
         value: "20"
-      - key: BASE_PATH
-        value: /
       - key: PORT
         value: "10000"
+      # ── Required ──────────────────────────────────────────────────────
       - key: TELEGRAM_BOT_TOKEN
-        sync: false
+        sync: false            # from @BotFather — add in the Render dashboard
+      # ── Recommended ───────────────────────────────────────────────────
       - key: ADMIN_CHAT_ID
-        sync: false
+        sync: false            # your Telegram chat id (get it from @userinfobot)
+      # ── Payment receiving wallets (required for paid service flows) ───
       - key: PAYMENT_WALLET_SOL
         sync: false
       - key: PAYMENT_WALLET_EVM
-        sync: false
+        sync: false            # receives ETH (Ethereum & Base) and BNB
       - key: PAYMENT_WALLET_TON
+        sync: false
+      # ── Persistence: point at a FREE Neon Postgres (recommended) ──────
+      #   postgresql://user:pass@ep-xxxx.aws.neon.tech/neondb?sslmode=require
+      - key: DATABASE_URL
+        sync: false
+      # ── Optional: explorer API keys (free; raise rate limits) ─────────
+      #   Without keys, verification still works via Blockscout (ETH/Base)
+      #   and public-RPC balance-delta (BSC + others).
+      - key: ETHERSCAN_API_KEY
+        sync: false
+      - key: BSCSCAN_API_KEY
+        sync: false
+      - key: BASESCAN_API_KEY
+        sync: false
+      - key: TONCENTER_API_KEY
+        sync: false
+      - key: SOLANA_RPC_URL
+        sync: false            # e.g. a free Helius/QuickNode RPC; default public
+      # ── Optional: webhook mode ────────────────────────────────────────
+      #   On the free tier, POLLING is more reliable than webhooks (Telegram
+      #   retries webhooks for a limited time while the app sleeps). Leave
+      #   WEBHOOK_URL unset unless you move to a paid always-on plan.
+      - key: WEBHOOK_URL
+        sync: false
+      - key: WEBHOOK_SECRET_PATH
+        sync: false
+      - key: WEBHOOK_SECRET_TOKEN
+        sync: false
+      # ── Optional: service pricing overrides ───────────────────────────
+      - key: DEX_UPDATE_PRICE_USD
+        sync: false
+      - key: DEX_UPDATE_SOL
+        sync: false
+      - key: DEX_UPDATE_ETH
+        sync: false
+      - key: DEX_UPDATE_BNB
+        sync: false
+      - key: DEX_UPDATE_TON
+        sync: false
+      - key: ORDER_EXPIRY_HOURS
+        sync: false
+      - key: PAYMENT_POLL_INTERVAL_MS
+        sync: false
+      # ── Optional lookup keys ──────────────────────────────────────────
+      - key: BIRDEYE_API_KEY
+        sync: false
+      - key: COINGECKO_API_KEY
+        sync: false
+      - key: MORALIS_API_KEY
         sync: false

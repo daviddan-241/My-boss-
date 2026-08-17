@@ -24,6 +24,19 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /health/bot:
+    get:
+      operationId: botHealthCheck
+      tags: [health]
+      summary: Bot & server diagnostics
+      description: Server uptime, bot mode/status, session count, lookup stats
+      responses:
+        "200":
+          description: Diagnostics payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BotHealth"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +46,49 @@ components:
           type: string
       required:
         - status
+    BotHealth:
+      type: object
+      properties:
+        server:
+          type: object
+          properties:
+            startedAt:
+              type: string
+            uptimeSec:
+              type: number
+            memoryRssMb:
+              type: number
+            nodeVersion:
+              type: string
+        bot:
+          type: object
+          properties:
+            enabled:
+              type: boolean
+            mode:
+              type: string
+            startedAt:
+              type: string
+              nullable: true
+            webhookUrl:
+              type: string
+              nullable: true
+            lastError:
+              type: string
+              nullable: true
+            pollErrors:
+              type: number
+        sessions:
+          type: number
+        lookups:
+          type: object
+          properties:
+            total:
+              type: number
+            cacheHits:
+              type: number
+            failures:
+              type: number
+            cacheSize:
+              type: number
 

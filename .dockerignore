@@ -1,0 +1,15 @@
+.git
+.gitignore
+node_modules
+**/node_modules
+dist
+**/dist
+*.tsbuildinfo
+.local
+.cache
+attached_assets
+artifacts/dex-boost-tracker
+artifacts/mockup-sandbox
+*.md
+Dockerfile
+.dockerignore
