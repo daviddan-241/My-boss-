@@ -64,6 +64,7 @@ async function loadOrder(): Promise<void> {
 
     $("details").style.display = "block";
     $("warn").style.display = "block";
+    $("hint").style.display = "block";
 
     if (order.status === "fulfilled") {
       $("btn-done").style.display = "block";

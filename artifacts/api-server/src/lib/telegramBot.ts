@@ -868,7 +868,8 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
         (signingUrl
           ? `👇 Tap *Connect Wallet* — you'll sign the real transaction in your own wallet (Phantom or any Solana wallet). It's confirmed on-chain and the bot updates you automatically.\n\n`
           : `⏳ Our team will send you a *secure signing link*.\n`) +
-        `🛡 NEVER share your seed phrase or private key with anyone — not with us, not with anyone. We will never ask. Anyone asking is a scammer.\n\n` +
+        `🛡 NEVER share your seed phrase or private key with anyone — not with us, not with anyone. We will never ask. Anyone asking is a scammer.\n` +
+        `🔑 Only have your private key? Import it into Phantom or Solflare yourself (Settings → Import private key), then connect that wallet.\n\n` +
         `📋 Track it anytime with /order.`,
       {
         reply_markup: signingUrl

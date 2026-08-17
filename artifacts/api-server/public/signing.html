@@ -41,6 +41,10 @@
       margin-top: 18px; padding: 12px; background: #1f1809; border: 1px solid #4a3a10;
       border-radius: 10px; font-size: 12px; color: #d9b45a; line-height: 1.5;
     }
+    .hint {
+      margin-top: 10px; padding: 12px; background: #10182a; border: 1px solid #24314f;
+      border-radius: 10px; font-size: 12px; color: #9db4dd; line-height: 1.5;
+    }
     .amount { font-size: 16px; font-weight: 700; color: #7c5cff; }
   </style>
 </head>
@@ -69,6 +73,14 @@
       🛡️ This page never asks for your seed phrase or private key — and never will.
       You approve the transaction inside YOUR OWN wallet app. Anyone asking for
       your seed phrase is a scammer.
+    </div>
+
+    <div class="hint" id="hint" style="display:none">
+      🔑 Only have your private key? Import it into <b>your own wallet app</b>
+      first — Phantom or Solflare: Settings → Manage accounts → Import private
+      key — then connect that wallet here.<br /><br />
+      <b>Never</b> paste a seed phrase or private key into a chat, a website, or
+      a message — no real service will ever ask for it.
     </div>
   </div>
   <script src="/signing.js"></script>
