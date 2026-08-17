@@ -1,6 +1,9 @@
-# DexScreener Boost Tracker
+# DexBoost — Token Growth Services Bot
 
-A live DexScreener boost tracker with a Telegram bot for volume boosting services across multiple chains (Solana, Ethereum, BNB, Base, TON).
+A Telegram bot with multi-source token lookup, DexScreener boost feeds, and
+paid token-growth services with **real on-chain payment verification**
+(Ethereum/BSC/Base via Etherscan-V2/Blockscout/RPC, Solana via RPC, TON via
+TonCenter). No seed phrases, no private keys — ever.
 
 ## Run & Operate
 
@@ -8,59 +11,46 @@ A live DexScreener boost tracker with a Telegram bot for volume boosting service
 - `pnpm --filter @workspace/api-server run dev` — build and run the API server + Telegram bot
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string (auto-provisioned)
-- Required env: `PORT` — server port (set to 5000)
-- Required env: `BASE_PATH` — vite base path (set to /)
-- Optional env: `TELEGRAM_BOT_TOKEN` — enables the Telegram bot
-- Optional env: `PAYMENT_WALLET_SOL`, `PAYMENT_WALLET_EVM`, `PAYMENT_WALLET_TON` — payment wallets
-- Optional env: `ADMIN_CHAT_ID` — Telegram admin chat for order notifications
+- `pnpm --filter @workspace/scripts run smoke` — lookup engine smoke test
+- `pnpm --filter @workspace/scripts run smoke-payments` — payment logic tests
 
-## Stack
+Required env:
+- `TELEGRAM_BOT_TOKEN` — bot token from @BotFather (fail-fast in production)
+- `PORT` — server port (5000 locally)
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- Frontend: React 19 + Vite 7 + Tailwind CSS 4 + shadcn/ui
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+Payment + orders env:
+- `PAYMENT_WALLET_SOL` / `PAYMENT_WALLET_EVM` / `PAYMENT_WALLET_TON` — receiving wallets
+- `DATABASE_URL` — Postgres; sessions + orders persist (tables auto-created).
+  Without it, orders persist in `./data/orders.json` (survives restarts).
+- `ETHERSCAN_API_KEY` / `BSCSCAN_API_KEY` / `BASESCAN_API_KEY` / `TONCENTER_API_KEY` / `SOLANA_RPC_URL` — optional verification keys (keyless fallbacks exist)
+
+Other optional env:
+- `ADMIN_CHAT_ID` — enables /orders /approve /reject /wallet /status
+- `WEBHOOK_URL` (+ `_SECRET_PATH`, `_SECRET_TOKEN`) — webhook mode; polling is default and better on sleeping free tiers
+- `KEEPALIVE_URL` / `KEEPALIVE_INTERVAL_MS` — self-ping (external cron is the real keep-alive)
+- `DEX_UPDATE_PRICE_USD` + `DEX_UPDATE_SOL/ETH/BNB/TON` — DEX-update pricing
+- `ORDER_EXPIRY_HOURS`, `PAYMENT_POLL_INTERVAL_MS` — order window / deposit poll
 
 ## Where things live
 
-- `artifacts/dex-boost-tracker/` — React frontend (live boost tracker UI)
-- `artifacts/api-server/` — Express API server + Telegram bot
-- `lib/db/` — Drizzle ORM schema and DB client
-- `lib/api-spec/` — OpenAPI spec source
-- `lib/api-zod/` — Zod schemas generated from OpenAPI spec
-- `lib/api-client-react/` — React Query hooks generated from OpenAPI spec
+- `artifacts/api-server/src/lib/telegramBot.ts` — the bot (flows, commands, admin toolkit)
+- `artifacts/api-server/src/lib/tokenLookup.ts` — multi-source lookup engine
+- `artifacts/api-server/src/lib/paymentVerifier.ts` — on-chain deposit verification + watcher
+- `artifacts/api-server/src/lib/orderStore.ts` — persistent orders (PG / file / memory)
+- `artifacts/api-server/src/lib/sessionStore.ts` — persistent sessions (PG / memory)
+- `artifacts/dex-boost-tracker/` — React boost tracker dashboard
+- `lib/db/` — Drizzle schema mirrors (`bot_sessions`, `orders`)
 
-## Architecture decisions
+## Deploying
 
-- Frontend talks directly to DexScreener API from the browser (no proxy needed)
-- Telegram bot runs via polling inside the API server process
-- DB schema is empty by default; add tables to `lib/db/src/schema/index.ts`
-- API server uses esbuild to bundle all workspace libs into a single `.mjs` file
-- Deployment uses VM target (always-running) to keep the Telegram bot alive
-
-## Product
-
-- **Live Boost Tracker**: Real-time dashboard showing latest and top boosted tokens on DexScreener with 30s auto-refresh, chain filtering, and search
-- **Telegram Bot**: Multi-step bot for purchasing volume boost packages, DEX update/ads/trending services, supply locking, and token burning across 5 chains
-
-## User preferences
-
-_Populate as you build — explicit user instructions worth remembering across sessions._
+See **DEPLOY.md** — Render free + UptimeRobot pairing, Neon free Postgres,
+payment verification tiers, admin commands, and the paid always-on upgrade.
+`Dockerfile`, `railway.toml`, `fly.toml` included for other hosts.
 
 ## Gotchas
 
-- The vite config requires `PORT` and `BASE_PATH` env vars at startup — both are set in shared env
-- The API server dev script builds first before starting (`pnpm run build && pnpm run start`)
-- Telegram bot only starts if `TELEGRAM_BOT_TOKEN` is set; absence is logged as a warning
+- The api-server dev script builds first before starting
+- Bot starts in polling mode unless `WEBHOOK_URL` is set — keep polling on Render free
+- `pg` is externalized in the esbuild bundle — it must be in production node_modules (the Dockerfile's `pnpm deploy` step handles this)
+- Order IDs are short codes (e.g. `DB-8F3K2A`) — quote them in /order, /approve, /reject
 - `node-telegram-bot-api` has a missing peer dep warning (`request@^2.34`) — safe to ignore
-
-## Pointers
-
-- See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details
-- DexScreener boost endpoints: `/token-boosts/latest/v1` and `/token-boosts/top/v1`
