@@ -26,6 +26,7 @@
  */
 
 import { logger } from "./logger.js";
+import { PublicKey } from "@solana/web3.js";
 import {
   recordLookupResult,
   recordSourceResult,
@@ -690,6 +691,262 @@ async function lookupMoralis(address: string, chainId: string): Promise<TokenInf
   };
 }
 
+// ─── Solana on-chain source ──────────────────────────────────────────────────
+//
+// Reads token metadata and pump.fun bonding-curve state DIRECTLY from the
+// Solana chain. This is the source that resolves coins no API still knows
+// about: months-old pump.fun tokens, dead pools, delisted coins — any mint
+// that ever existed. Three metadata layouts are handled:
+//   1. Metaplex Token Metadata PDA (most coins, incl. old pump.fun)
+//   2. Raw account-buffer URI scan (pump.fun's newer on-chain format)
+//   3. The metadata URI JSON itself (authoritative name/symbol/image)
+
+const SOLANA_METADATA_PROGRAM = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
+const PUMP_FUN_PROGRAM = new PublicKey("6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P");
+const SOLANA_RPC_FALLBACKS = [
+  "https://solana-rpc.publicnode.com",
+  "https://api.mainnet-beta.solana.com",
+];
+
+function solanaRpcUrls(): string[] {
+  const custom = process.env["SOLANA_RPC_URL"]?.trim();
+  const list = custom ? [custom] : [];
+  return [...list, ...SOLANA_RPC_FALLBACKS.filter((u) => u !== custom)];
+}
+
+/** JSON-RPC call with the shared rate-limit bucket + one retry. */
+async function solanaRpc(rpcUrl: string, method: string, params: unknown[]): Promise<any> {
+  await bucketFor("solana-rpc", 15, 5).take();
+  const started = Date.now();
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= 1; attempt++) {
+    try {
+      const res = await fetch(rpcUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { error?: { message?: string }; result?: unknown };
+      if (data.error) throw new Error(`rpc: ${data.error.message ?? "error"}`);
+      recordSourceResult("solana-rpc", true, Date.now() - started);
+      return data.result;
+    } catch (err) {
+      lastErr = err;
+      if (attempt === 0) await sleep(500);
+    }
+  }
+  recordSourceResult("solana-rpc", false, Date.now() - started, String(lastErr));
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+/** Try every configured RPC URL until one returns the account (or all fail). */
+async function solanaGetAccount(pubkey: string): Promise<{ data: Buffer } | null> {
+  for (const rpc of solanaRpcUrls()) {
+    try {
+      const result = await solanaRpc(rpc, "getAccountInfo", [pubkey, { encoding: "base64" }]);
+      const data = result?.value?.data;
+      if (Array.isArray(data) && typeof data[0] === "string") {
+        return { data: Buffer.from(data[0], "base64") };
+      }
+      return null; // account does not exist on this RPC (authoritative answer)
+    } catch {
+      // try the next RPC
+    }
+  }
+  return null;
+}
+
+/** Parse Metaplex MetadataV1 account (borsh strings at fixed offsets). */
+function parseMetaplexMetadata(b: Buffer): { name: string; symbol: string; uri: string | null } | null {
+  if (b.length < 120 || b[0] !== 4) return null;
+  let off = 65;
+  const readStr = (): string | null => {
+    if (off + 4 > b.length) return null;
+    const len = b.readUInt32LE(off);
+    off += 4;
+    if (off + len > b.length) return null;
+    const s = b.subarray(off, off + len).toString("utf8").replace(/\0+$/g, "").trim();
+    off += len;
+    return s;
+  };
+  const name = readStr();
+  const symbol = readStr();
+  const uri = readStr();
+  return name && symbol ? { name, symbol, uri } : null;
+}
+
+/** Scan a raw account buffer for the first http(s)/ipfs/ar URI (new pump.fun layout). */
+function scanUriFromBuffer(b: Buffer): string | null {
+  const text = b.toString("utf8");
+  const m = text.match(/https?:\/\/[^\x00-\x1f" ]+/i) ?? text.match(/ipfs:\/\/[A-Za-z0-9/._-]+/i);
+  return m ? m[0] : null;
+}
+
+/** Convert ipfs:// / ar:// URIs into fetchable https gateways. */
+function normalizeMetadataUri(uri: string): string {
+  const u = uri.trim();
+  if (u.startsWith("ipfs://")) return `https://ipfs.io/ipfs/${u.slice("ipfs://".length)}`;
+  if (u.startsWith("ar://")) return `https://arweave.net/${u.slice("ar://".length)}`;
+  return u;
+}
+
+interface UriMetadata {
+  name?: string;
+  symbol?: string;
+  image?: string;
+}
+
+/** Fetch the metadata URI JSON — authoritative name/symbol/image. */
+async function fetchUriMetadata(uri: string): Promise<UriMetadata | null> {
+  try {
+    await bucketFor("solana-metadata", 8, 3).take();
+    const res = await fetch(normalizeMetadataUri(uri), {
+      signal: AbortSignal.timeout(6_000),
+      headers: { accept: "application/json" },
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as Record<string, unknown>;
+    return {
+      name: typeof json.name === "string" ? json.name : undefined,
+      symbol: typeof json.symbol === "string" ? json.symbol : undefined,
+      image: typeof json.image === "string" ? json.image : undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+// SOL/USD price cache (used to enrich bonding-curve data; best-effort only).
+let solUsdCache: { price: number; at: number } | null = null;
+
+async function getSolUsd(): Promise<number | null> {
+  if (solUsdCache && Date.now() - solUsdCache.at < 10 * 60_000) return solUsdCache.price;
+  try {
+    await bucketFor("coingecko-price", 3, 0.1).take();
+    const res = await fetch(
+      "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
+      { signal: AbortSignal.timeout(5_000), headers: { accept: "application/json" } },
+    );
+    if (!res.ok) return null;
+    const json = (await res.json()) as { solana?: { usd?: number } };
+    const price = json.solana?.usd;
+    if (typeof price === "number" && price > 0) {
+      solUsdCache = { price, at: Date.now() };
+      return price;
+    }
+  } catch {
+    /* best-effort */
+  }
+  return null;
+}
+
+/** The on-chain Solana source: any mint that ever existed gets a result. */
+async function lookupSolanaOnChain(mint: string): Promise<TokenInfo> {
+  let name: string | undefined;
+  let symbol: string | undefined;
+  let uri: string | undefined;
+
+  // 1. Metaplex metadata PDA (standard layout).
+  const [metaPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("metadata"), SOLANA_METADATA_PROGRAM.toBuffer(), new PublicKey(mint).toBuffer()],
+    SOLANA_METADATA_PROGRAM,
+  );
+  const metaAcct = await solanaGetAccount(metaPda.toBase58());
+  if (metaAcct) {
+    const parsed = parseMetaplexMetadata(metaAcct.data);
+    if (parsed) {
+      name = parsed.name;
+      symbol = parsed.symbol;
+      if (parsed.uri) uri = parsed.uri;
+    }
+  }
+
+  // 2. No PDA → scan the mint account itself (pump.fun's newer format).
+  if (!name || !symbol) {
+    const mintAcct = await solanaGetAccount(mint);
+    if (mintAcct) {
+      const scanned = scanUriFromBuffer(mintAcct.data);
+      if (scanned) uri = scanned;
+    }
+  }
+
+  // 3. URI JSON is authoritative for name/symbol/image when available.
+  let imageUrl: string | undefined;
+  if (uri) {
+    const md = await fetchUriMetadata(uri);
+    if (md) {
+      if (!name) name = md.name;
+      if (!symbol) symbol = md.symbol;
+      if (md.image) imageUrl = md.image.startsWith("ipfs://") ? normalizeMetadataUri(md.image) : md.image;
+    }
+  }
+
+  if (!name || !symbol) {
+    throw new Error("no on-chain metadata for this mint");
+  }
+
+  // 4. pump.fun bonding curve state (price / market cap / status).
+  let status = "On-chain metadata — no active trading";
+  let priceStr: string | undefined;
+  let priceRaw: number | undefined;
+  let marketCap: number | undefined;
+  let bondingCurve: number | undefined;
+  let dexUrl: string | undefined;
+
+  const [bcPda] = PublicKey.findProgramAddressSync(
+    [Buffer.from("bonding-curve"), new PublicKey(mint).toBuffer()],
+    PUMP_FUN_PROGRAM,
+  );
+  const bcAcct = await solanaGetAccount(bcPda.toBase58());
+  if (bcAcct && bcAcct.data.length >= 49) {
+    const b = bcAcct.data;
+    const u64 = (o: number) => b.readBigUInt64LE(o);
+    const vTok = u64(8);
+    const vSol = u64(16);
+    const total = u64(40);
+    const complete = b[48];
+    dexUrl = `https://pump.fun/coin/${mint}`;
+
+    if (complete === 1 && vTok === 0n && vSol === 0n) {
+      status = "Graduated ✅ (bonding curve complete)";
+    } else if (vTok > 0n && vSol > 0n) {
+      const priceSol = Number(vSol) / 1e9 / (Number(vTok) / 1e6);
+      const mcSol = (priceSol * Number(total)) / 1e6;
+      priceStr = `${priceSol.toFixed(8)} SOL`;
+      status = "🔄 Bonding Curve (live)";
+      const solUsd = await getSolUsd();
+      if (solUsd) {
+        priceRaw = priceSol * solUsd;
+        priceStr = fmtPrice(priceRaw);
+        marketCap = mcSol * solUsd;
+        // pump.fun curves graduate at ~$69k market cap.
+        bondingCurve = Math.min(Math.round(((mcSol * solUsd) / 69_000) * 100), 99);
+      }
+    } else {
+      status = "Bonding curve settled — no active trading";
+    }
+  }
+
+  return {
+    name,
+    symbol: symbol.toUpperCase(),
+    chain: "Solana",
+    chainId: "solana",
+    chainEmoji: "🟣",
+    address: mint,
+    price: priceStr,
+    priceRaw,
+    marketCap,
+    bondingCurve,
+    status,
+    dexUrl,
+    imageUrl,
+    source: "SolanaOnChain",
+  };
+}
+
 // ─── EVM chain auto-detection (GeckoTerminal network probes) ──────────────────
 
 export async function detectEvmChain(address: string): Promise<string | null> {
@@ -850,13 +1107,20 @@ async function enrichMissingImage(t: TokenInfo): Promise<TokenInfo> {
   if (cg) jobs.push(lookupCoinGecko(t.address, cg).catch(() => null));
   if (!jobs.length) return t;
 
-  const results = await Promise.allSettled(jobs);
-  for (const r of results) {
-    if (r.status === "fulfilled" && r.value?.imageUrl) {
-      t.imageUrl = r.value.imageUrl;
-      t.sources = [...(t.sources ?? [t.source]), r.value.source];
-      break;
+  // Best-effort with a hard 3s budget — image enrichment must never delay
+  // the answer. (Promise.race, not allSettled: a slow rate-limited job must
+  // not hold the response hostage.)
+  const budget = new Promise<TokenInfo | null>((resolve) => setTimeout(() => resolve(null), 3000));
+  const firstWithImage = Promise.allSettled(jobs).then((rs) => {
+    for (const r of rs) {
+      if (r.status === "fulfilled" && r.value?.imageUrl) return r.value;
     }
+    return null;
+  });
+  const enriched = await Promise.race([firstWithImage, budget]);
+  if (enriched?.imageUrl) {
+    t.imageUrl = enriched.imageUrl;
+    t.sources = [...(t.sources ?? [t.source]), enriched.source];
   }
   return t;
 }
@@ -879,16 +1143,40 @@ async function trySource(
   fn: () => Promise<TokenInfo | null>,
   results: TokenInfo[],
   tried: SourceResult[],
+  open?: () => boolean,
 ): Promise<void> {
   const started = Date.now();
   try {
     const token = await fn();
-    if (token) results.push(token);
+    // If the wave was cut short by the fast path, late results are not merged
+    // into the answer but still count as telemetry.
+    if (token && (open?.() ?? true)) results.push(token);
     tried.push({ source: name, ok: true, ms: Date.now() - started });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     tried.push({ source: name, ok: false, ms: Date.now() - started, error: message });
   }
+}
+
+/**
+ * Race a wave of sources: resolve as soon as (a) everything settled, or
+ * (b) at least one result exists and a 1.5s grace period passed, or (c) an
+ * 8s hard ceiling elapsed. Keeps lookups fast even when one upstream API is
+ * rate-limiting us; remaining fetches finish in the background.
+ */
+async function raceWave(wave: Promise<void>[], hasResult: () => boolean): Promise<void> {
+  const settled = Promise.allSettled(wave);
+  const fastPath = new Promise<void>((resolve) => {
+    const t0 = Date.now();
+    const tick = (): void => {
+      const elapsed = Date.now() - t0;
+      if (hasResult() && elapsed > 1500) resolve();
+      else if (elapsed >= 8000) resolve();
+      else setTimeout(tick, 120);
+    };
+    tick();
+  });
+  await Promise.race([settled, fastPath]);
 }
 
 export async function lookupToken(
@@ -909,12 +1197,20 @@ export async function lookupToken(
       recordLookupResult(cacheHit.token != null, true);
       return { token: cacheHit.token, tried: cacheHit.tried, fromCache: true };
     }
-    await trySource("dexscreener-search", async () => {
-      const t = await lookupDexScreener(address);
-      return t;
-    }, results, tried);
-    await trySource("geckoterminal-search", () => searchGeckoTerminal(address), results, tried);
-    await trySource("coingecko-search", () => searchCoinGecko(address), results, tried);
+    let waveOpen = true;
+    const isOpen = (): boolean => waveOpen;
+    await raceWave(
+      [
+        trySource("dexscreener-search", async () => {
+          const t = await lookupDexScreener(address);
+          return t;
+        }, results, tried, isOpen),
+        trySource("geckoterminal-search", () => searchGeckoTerminal(address), results, tried, isOpen),
+        trySource("coingecko-search", () => searchCoinGecko(address), results, tried, isOpen),
+      ],
+      () => results.length > 0,
+    );
+    waveOpen = false;
     let token = results.length ? mergeResults(pickWinner(results), results) : null;
     if (token) token = await enrichMissingImage(token);
     recordLookupResult(token != null, false);
@@ -931,36 +1227,46 @@ export async function lookupToken(
     return { token: cacheHit.token, tried: cacheHit.tried, fromCache: true };
   }
 
-  const chain = CHAIN_MAP[chainHint ?? ""];
+  // Chain implied by the address format (Solana / TON) — used so every
+  // chain-specific source runs even without an explicit chain hint.
+  const formatChainId = format === "solana" ? "solana" : format === "ton" ? "ton" : undefined;
+  const effectiveChainId = chainHint ?? formatChainId;
+  const chain = CHAIN_MAP[effectiveChainId ?? ""];
 
   // Wave 1 — everything we can query in parallel.
+  let waveOpen = true;
+  const isOpen = (): boolean => waveOpen;
   const wave1: Promise<void>[] = [
-    trySource("dexscreener", () => lookupDexScreener(address, chainHint), results, tried),
+    trySource("dexscreener", () => lookupDexScreener(address, chainHint), results, tried, isOpen),
   ];
 
   if (format === "solana") {
-    wave1.push(trySource("pumpfun", () => lookupPumpFun(address), results, tried));
-    wave1.push(trySource("jupiter", () => lookupJupiter(address), results, tried));
+    wave1.push(trySource("pumpfun", () => lookupPumpFun(address), results, tried, isOpen));
+    wave1.push(trySource("jupiter", () => lookupJupiter(address), results, tried, isOpen));
+    // The on-chain source resolves ANY mint that ever existed — old coins,
+    // dead pools, live bonding curves. Always tried for Solana.
+    wave1.push(trySource("solana-onchain", () => lookupSolanaOnChain(address), results, tried, isOpen));
     if (process.env["BIRDEYE_API_KEY"]) {
-      wave1.push(trySource("birdeye", () => lookupBirdeye(address, "solana"), results, tried));
+      wave1.push(trySource("birdeye", () => lookupBirdeye(address, "solana"), results, tried, isOpen));
     }
   }
 
   if (chain?.geckoTerminalNetwork) {
     wave1.push(
-      trySource("geckoterminal", () => lookupGeckoTerminal(address, chain.geckoTerminalNetwork!), results, tried),
+      trySource("geckoterminal", () => lookupGeckoTerminal(address, chain.geckoTerminalNetwork!), results, tried, isOpen),
     );
   }
   if (chain?.coinGeckoPlatform) {
     wave1.push(
-      trySource("coingecko", () => lookupCoinGecko(address, chain.coinGeckoPlatform!), results, tried),
+      trySource("coingecko", () => lookupCoinGecko(address, chain.coinGeckoPlatform!), results, tried, isOpen),
     );
   }
   if (format === "evm" && chain?.moralisChain && process.env["MORALIS_API_KEY"]) {
-    wave1.push(trySource("moralis", () => lookupMoralis(address, chainHint!), results, tried));
+    wave1.push(trySource("moralis", () => lookupMoralis(address, chainHint!), results, tried, isOpen));
   }
 
-  await Promise.allSettled(wave1);
+  await raceWave(wave1, () => results.length > 0);
+  waveOpen = false;
 
   // Wave 2 — EVM auto-detection when the user didn't pick a chain.
   let detectedChain: string | undefined;

@@ -335,14 +335,6 @@ const KB_MAIN = () =>
       { text: "🔒 Lock Supply", callback_data: "lock_supply" },
       { text: "🔥 Burn Token", callback_data: "burn_token" },
     ],
-    [
-      { text: "🔍 Check Token", callback_data: "check_token" },
-      { text: "📋 My Order", callback_data: "order_status" },
-    ],
-    [
-      { text: "📰 Latest Boosts", callback_data: "boost_latest" },
-      { text: "🏆 Top Boosts", callback_data: "boost_top" },
-    ],
   ]);
 
 const KB_CANCEL = () => kb([[{ text: "❌ Cancel", callback_data: "cancel" }]]);
@@ -1233,12 +1225,13 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
   bot.setMyCommands([
     { command: "start", description: "🏠 Main menu" },
     { command: "volume", description: "📦 Volume packages & pricing" },
-    { command: "lookup", description: "🔍 Look up a token (address or name)" },
-    { command: "order", description: "📋 Your latest order status" },
+    { command: "lookup", description: "🔍 Check token (address or name)" },
+    { command: "order", description: "📋 My order status" },
     { command: "latest", description: "📰 Latest boosted tokens" },
     { command: "top", description: "🏆 Top boosted tokens" },
     { command: "golden", description: "🌟 Golden Ticker tokens" },
     { command: "chains", description: "🌐 Supported chains" },
+    { command: "support", description: "🆘 Contact support" },
     { command: "help", description: "❓ Help" },
     { command: "cancel", description: "❌ Cancel current action" },
   ]).catch(() => {});
@@ -1284,8 +1277,19 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     }
   });
 
-  bot.onText(/^\/order/, async (msg) => {
+  bot.onText(/^\/order$/, async (msg) => {
     await sendUserOrderStatus(msg.chat.id, msg.from?.id ?? msg.chat.id);
+  });
+
+  bot.onText(/^\/support(?:@\w+)?/, async (msg) => {
+    const userId = msg.from?.id ?? msg.chat.id;
+    await setSession(userId, { step: "support_msg" });
+    await sendMsg(
+      bot,
+      msg.chat.id,
+      `🆘 Support\n\nSend your message here and our team will reply in this chat.`,
+      { reply_markup: KB_CANCEL() },
+    );
   });
 
   bot.onText(/^\/cancel/, async (msg) => {
@@ -1297,7 +1301,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     await sendMsg(
       bot,
       msg.chat.id,
-      `🦅 DexBoost — Help\n\n/start — 🏠 Main menu\n/volume — 📦 View all volume packages\n/lookup <CA or name> — 🔍 Token lookup (multi-source)\n/order — 📋 Your latest order status\n/latest · /top · /golden — 📰 DexScreener boost feeds\n/chains — 🌐 Supported chains\n/cancel — ❌ Cancel current action\n\nQuick Start:\n1. Tap "🚀 Start Volume Bot"\n2. Paste your token contract address\n3. Choose a package\n4. Send payment → auto-confirmed on-chain\n\n🔒 Lock Supply & 🔥 Burn Token are in the main menu — you sign via a secure link with YOUR wallet.\n\n💳 Payments are verified on-chain. Orders are valid for ${payment.orderExpiryHours}h.\n\n⚠️ This bot never asks for seed phrases, private keys, or passwords. No legitimate service does — never share them with anyone.`,
+      `🦅 DexBoost — Help\n\n/start — 🏠 Main menu\n/volume — 📦 View all volume packages\n/lookup <CA or name> — 🔍 Check a token\n/order — 📋 My order status\n/latest — 📰 Latest boosted tokens\n/top — 🏆 Top boosted tokens\n/golden — 🌟 Golden Ticker tokens\n/chains — 🌐 Supported chains\n/support — 🆘 Contact support\n/cancel — ❌ Cancel current action\n\nQuick Start:\n1. Tap "🚀 Start Volume Bot"\n2. Paste your token contract address\n3. Choose a package\n4. Send payment → auto-confirmed on-chain\n\n🔒 Lock Supply & 🔥 Burn Token are in the main menu — you sign via a secure link with YOUR wallet.\n\n💳 Payments are verified on-chain. Orders are valid for ${payment.orderExpiryHours}h.\n\n⚠️ This bot never asks for seed phrases, private keys, or passwords. No legitimate service does — never share them with anyone.`,
       { reply_markup: KB_BACK_MAIN() },
     );
   });
@@ -1579,6 +1583,25 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
       }
       await setSession(userId, { step: "burn_summary", draft: { ...draft, pct } });
       await sendBurnSummary(chatId, draftToken as unknown as TokenInfo, pct);
+      return;
+    }
+
+    // Support: forward the message to the team
+    if (session.step === "support_msg") {
+      const from = msg.from;
+      const name = [from?.first_name, from?.last_name].filter(Boolean).join(" ") || "—";
+      await clearSession(userId);
+      await notifyAdmin(
+        `🆘 *Support request*\n\n` +
+          `👤 User: \`${userId}\` — ${esc(name)}${from?.username ? ` (@${esc(from.username)})` : ""}\n\n` +
+          `💬 Message:\n${esc(msg.text)}`,
+      );
+      await sendMsg(
+        bot,
+        chatId,
+        `✅ Message sent to our team! We'll reply here as soon as possible.`,
+        { reply_markup: KB_BACK_MAIN() },
+      );
       return;
     }
 

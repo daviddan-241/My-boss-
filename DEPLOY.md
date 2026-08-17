@@ -97,10 +97,17 @@ payment — includes amount and tx link), expiries, and bot online/offline
 pings.
 
 **Lookups always try everywhere** — DexScreener, PumpFun, GeckoTerminal,
-CoinGecko, Birdeye, Jupiter, Moralis — with logo/image retrieval and an
-enrichment pass (GeckoTerminal/CoinGecko contract lookups) so results include
-the token image. Old coins from years ago resolve too, since contract-based
-sources don't depend on recent trading activity.
+CoinGecko, Birdeye, Jupiter, Moralis, **plus the Solana chain itself**: token
+metadata (Metaplex) and the pump.fun bonding-curve state are read directly
+from the RPC, so ANY Solana mint that ever existed resolves — months-old
+pump.fun coins, token-2022 mints, dead pools. Results include the token logo,
+and a fast-path races sources so answers land in ~1.5s even when one API is
+rate-limiting.
+
+**New env (optional):** `SOLANA_RPC_URL` — powers the on-chain source.
+Defaults to public RPCs (fine), but a **free Helius or QuickNode RPC** is
+strongly recommended for speed and reliability. All other env vars are
+unchanged from before.
 
 **Built-in self-warm keep-alive**: the server pings its own `/api/healthz`
 every 5 minutes by default (override with `KEEPALIVE_URL`). This keeps the

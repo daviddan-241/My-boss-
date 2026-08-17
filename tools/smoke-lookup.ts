@@ -16,6 +16,8 @@ const CASES: { label: string; input: string; chainHint?: string; isQuery?: boole
   { label: "EVM token, auto-detect (USDC/ETH)", input: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" },
   { label: "Name search (pepe)", input: "pepe", isQuery: true },
   { label: "OLD coin, 2017 ERC-20 (Maker MKR)", input: "0x9f8F72aA9304c8B593d555F12eF6589cC3A579A2" },
+  { label: "OLD pump.fun coin, months old (FWOG)", input: "A8C3xuqscfmyLrte3VmTqrAq8kgMASius9AFNANwpump" },
+  { label: "FRESH pump.fun coin (token-2022 format)", input: "512B2eBDSDg3xY88Jw3Qprqf6kGSvXLRH7L1kRaSpump" },
 ];
 
 const PROBES: { label: string; input: string; expect: string }[] = [

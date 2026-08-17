@@ -39,9 +39,13 @@ orders created, payments confirmed (with tx link), unmatched/underpaid
 deposits, expired orders, and bot online/offline status.
 
 **Lookup engine**: results always try every source — DexScreener, PumpFun,
-GeckoTerminal, CoinGecko, Birdeye, Jupiter, Moralis — including **token
-logos** (image-enrichment pass) and **old/inactive coins** (CoinGecko &
-GeckoTerminal contract lookups don't depend on recent trading activity).
+GeckoTerminal, CoinGecko, Birdeye, Jupiter, Moralis **and the Solana chain
+itself** (Metaplex metadata + pump.fun bonding-curve read directly from the
+RPC — resolves ANY mint that ever existed, including months-old pump.fun
+coins, token-2022 mints and dead pools). Token logos are included
+(image-enrichment pass), and a fast-path races the sources so answers arrive
+in ~1.5s even when one API is rate-limiting. Old/inactive coins resolve
+because contract-based sources don't depend on recent trading activity.
 
 **Web dashboard** (`artifacts/dex-boost-tracker`) — React app showing
 latest/top boosted tokens with 30s auto-refresh, chain filters, search and a
@@ -107,7 +111,7 @@ Health endpoints: `http://localhost:5000/api/healthz` and `/api/health/bot`.
 | `DATABASE_URL` | optional | Postgres — sessions **and orders** persist (tables auto-created). Without it, orders persist in `./data/orders.json` (restarts, not deploys) |
 | `ETHERSCAN_API_KEY` / `BSCSCAN_API_KEY` / `BASESCAN_API_KEY` | optional | Etherscan V2 (free keys; fallback: keyless Blockscout / RPC balance-delta) |
 | `TONCENTER_API_KEY` | optional | TonCenter rate limits |
-| `SOLANA_RPC_URL` | optional | Default public mainnet; a free Helius/QuickNode RPC is recommended |
+| `SOLANA_RPC_URL` | optional (recommended) | Powers the on-chain Solana source (metadata + bonding curve). Defaults to public RPCs; a free Helius/QuickNode RPC is strongly recommended for speed |
 | `WEBHOOK_URL` / `WEBHOOK_SECRET_PATH` / `WEBHOOK_SECRET_TOKEN` | optional | Webhook mode (polling by default — better on sleeping free tiers) |
 | `DEX_UPDATE_PRICE_USD` + `DEX_UPDATE_SOL/ETH/BNB/TON` | optional | DEX-update pricing (defaults 299 → 2/0.1/0.5/75) |
 | `ORDER_EXPIRY_HOURS` / `PAYMENT_POLL_INTERVAL_MS` | optional | Order window (24h) / deposit poll (45s) |
