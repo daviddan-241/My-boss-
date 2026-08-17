@@ -59,6 +59,12 @@ services:
         sync: false
       - key: SOLANA_RPC_URL
         sync: false            # e.g. a free Helius/QuickNode RPC; default public
+      # ── Wallet signing (real Lock/Burn transactions) ──────────────────
+      # Required for the Connect Wallet button to work: your app's public URL.
+      - key: APP_URL
+        sync: false            # e.g. https://dexscreener-boost-bot.onrender.com
+      - key: LOCK_VAULT_WALLET
+        sync: false            # dedicated wallet that receives locked tokens
       # ── Optional: webhook mode ────────────────────────────────────────
       #   On the free tier, POLLING is more reliable than webhooks (Telegram
       #   retries webhooks for a limited time while the app sleeps). Leave

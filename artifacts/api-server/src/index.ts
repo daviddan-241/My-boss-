@@ -3,9 +3,10 @@
  *
  * Responsibilities:
  *   - Validate all env vars at boot and fail fast with actionable messages
- *   - Boot Express (health endpoints, webhook route)
+ *   - Boot Express (health endpoints, webhook route, signing webapp)
  *   - Start the Telegram bot (webhook mode if WEBHOOK_URL is set, else polling)
  *   - Start the on-chain payment watcher (verifies real deposits per order)
+ *   - Wire the wallet-signing webapp (real lock/burn transactions)
  *   - Keep-alive self-ping when KEEPALIVE_URL is configured
  *   - Graceful shutdown on SIGTERM/SIGINT
  */
@@ -17,6 +18,7 @@ import { createSessionStore } from "./lib/sessionStore";
 import { createOrderStore } from "./lib/orderStore";
 import { PaymentWatcher } from "./lib/paymentVerifier";
 import { setTelegramUpdateHandler } from "./routes/telegram";
+import { setSigningDeps } from "./routes/signing";
 import { startTelegramBot, type BotHandle } from "./lib/telegramBot";
 import { setBotStatus, setServerStartedAt } from "./lib/statusRegistry";
 
@@ -35,6 +37,8 @@ async function main(): Promise<void> {
       wallets: Object.fromEntries(
         Object.entries(env.paymentWallets).map(([k, v]) => [k, v ? "set" : "missing"]),
       ),
+      signingApp: env.appUrl ? "enabled" : "disabled (APP_URL not set)",
+      lockVault: env.lockVaultWallet ? "set" : "missing",
     },
     "Boot: configuration validated",
   );
@@ -65,6 +69,7 @@ async function main(): Promise<void> {
         dexUpdatePrices: env.dexUpdatePrices,
         orderExpiryHours: env.orderExpiryHours,
       },
+      appUrl: env.appUrl,
     });
     setBotStatus({ enabled: true });
     if (env.webhookUrl) {
@@ -97,11 +102,34 @@ async function main(): Promise<void> {
     );
   }
 
-  // 6. Keep-alive self-ping. Defaults to pinging OUR OWN /api/healthz — this
-  //    keeps the process warm (sockets, GC) on hosts that kill idle
-  //    connections. NOTE: it cannot wake a slept instance (a sleeping app
-  //    can't ping itself) — for Render free that's what the external
-  //    UptimeRobot monitor is for (see DEPLOY.md).
+  // 6. Wallet-signing webapp: verify signed tx on-chain → fulfill order → notify.
+  setSigningDeps(orderStore, async (orderId, signature, link) => {
+    const order = await orderStore.get(orderId);
+    if (!order) return;
+    const updated = await orderStore.update(order.id, {
+      status: "fulfilled",
+      fulfilledAt: Date.now(),
+      txHash: signature,
+      txLink: link,
+    });
+    if (updated && botHandle) {
+      await botHandle.notifyOrderFulfilled(updated);
+      if (env.adminChatId) {
+        await botHandle.bot
+          .sendMessage(
+            env.adminChatId,
+            `🔗 *Signed tx verified on-chain* — order \`${order.id}\` fulfilled automatically\n\n${link}`,
+            { parse_mode: "Markdown" },
+          )
+          .catch(() => {});
+      }
+    }
+  });
+
+  // 7. Keep-alive self-ping. Defaults to pinging OUR OWN /api/healthz — keeps
+  //    the process warm on hosts that kill idle connections. NOTE: it cannot
+  //    wake a slept instance; that's what external monitors (UptimeRobot)
+  //    are for on Render free.
   const keepAliveUrl = env.keepAliveUrl ?? `http://127.0.0.1:${env.port}/api/healthz`;
   let keepAliveTimer: NodeJS.Timeout | null = null;
   keepAliveTimer = setInterval(() => {
@@ -117,7 +145,7 @@ async function main(): Promise<void> {
     "Keep-alive enabled",
   );
 
-  // 7. Graceful shutdown.
+  // 8. Graceful shutdown.
   let shuttingDown = false;
   async function shutdown(signal: string): Promise<void> {
     if (shuttingDown) return;

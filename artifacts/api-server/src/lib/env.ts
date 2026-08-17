@@ -56,6 +56,12 @@ export interface Env {
   /** DEX Update service price (display + native conversion). */
   dexUpdateUsd: number;
   dexUpdatePrices: { sol: number; eth: number; bnb: number; ton: number };
+
+  // ── Wallet signing (real lock/burn transactions) ───────────────────────────
+  /** Public base URL of this service — used to build wallet-connect links. */
+  appUrl: string | undefined;
+  /** Dedicated wallet that receives locked tokens (custody lock). */
+  lockVaultWallet: string | undefined;
 }
 
 function fail(message: string): never {
@@ -155,6 +161,8 @@ export function loadEnv(): Env {
       bnb: readNum("DEX_UPDATE_BNB", 0.5, 0.000001, 1_000_000),
       ton: readNum("DEX_UPDATE_TON", 75, 0.000001, 1_000_000_000),
     },
+    appUrl: readStr("APP_URL"),
+    lockVaultWallet: readStr("LOCK_VAULT_WALLET"),
   };
 
   if (nodeEnv === "production") {

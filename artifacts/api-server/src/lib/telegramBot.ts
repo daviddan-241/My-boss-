@@ -62,6 +62,8 @@ export interface StartBotOptions {
   store: SessionStore;
   orderStore: OrderStore;
   payment: PaymentConfig;
+  /** Public base URL of the service — used to build wallet-connect links. */
+  appUrl?: string;
 }
 
 export interface BotHandle {
@@ -69,6 +71,7 @@ export interface BotHandle {
   processUpdate: (body: unknown) => Promise<void>;
   notifyOrderPaid: (order: Order, deposit: Deposit) => Promise<void>;
   notifyOrderExpired: (order: Order) => Promise<void>;
+  notifyOrderFulfilled: (order: Order) => Promise<void>;
   notifyUnknownDeposit: (deposit: Deposit, chainId: string, wallet: string) => Promise<void>;
   stop: () => Promise<void>;
 }
@@ -844,6 +847,17 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     };
     await orderStore.create(order);
 
+    // The REAL wallet connection: a URL button to the signing webapp, where
+    // the user connects THEIR wallet and signs the actual on-chain
+    // transaction. No keys, no seed phrases, ever.
+    const signingUrl = opts.appUrl
+      ? `${opts.appUrl.replace(/\/+$/, "")}/signing?order=${encodeURIComponent(order.id)}`
+      : undefined;
+
+    const signingButtons: Btn[][] = signingUrl
+      ? [[{ text: "🔗 Connect Wallet", url: signingUrl } as unknown as Btn]]
+      : [];
+
     await sendMsg(
       bot,
       chatId,
@@ -851,11 +865,16 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
         `✅ Request \`${order.id}\` logged!\n\n` +
         `${pkgName} — ${esc(t.symbol)} on ${t.chain}\n` +
         `📍 CA: \`${esc(addrShort(t.address))}\`\n\n` +
-        `⏳ Our team will review and send you a *secure signing link*.\n` +
-        `You approve the transaction with YOUR wallet — one tap, nothing else.\n\n` +
+        (signingUrl
+          ? `👇 Tap *Connect Wallet* — you'll sign the real transaction in your own wallet (Phantom or any Solana wallet). It's confirmed on-chain and the bot updates you automatically.\n\n`
+          : `⏳ Our team will send you a *secure signing link*.\n`) +
         `🛡 NEVER share your seed phrase or private key with anyone — not with us, not with anyone. We will never ask. Anyone asking is a scammer.\n\n` +
-        `📋 Track it anytime with /order or the "📋 My Order" button.`,
-      { reply_markup: KB_BACK_MAIN() },
+        `📋 Track it anytime with /order.`,
+      {
+        reply_markup: signingUrl
+          ? kb([...signingButtons, [{ text: "⬅️ Back to Main", callback_data: "back_main" }]])
+          : KB_BACK_MAIN(),
+      },
     );
 
     await notifyAdmin(
@@ -865,7 +884,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
         `📍 CA: \`${t.address}\`\n` +
         `💰 MC: ${t.marketCap ? fmtUsd(t.marketCap) : "—"}\n` +
         Object.entries(details).map(([k, v]) => `${k}: ${esc(v)}`).join("\n") +
-        `\n\n⚡ Action: send the user a secure wallet-connect signing link, then /approve ${order.id}`,
+        (signingUrl ? `\n\n🔗 Signing link: ${signingUrl}\n⚡ The order fulfills automatically when the signed tx lands on-chain.` : `\n\n⚠️ APP_URL not set — configure it so users get the automatic wallet-connect link.`),
       adminActionKeyboard(order.id),
     );
     await clearSession(userId);
@@ -1163,7 +1182,9 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     await sendMsg(
       bot,
       o.chatId,
-      `🎉 *Order ${o.id} completed!*\n\n${o.packageName ? `${esc(o.packageName)} — ` : ""}${esc(o.token.symbol)} on ${o.token.chain}\n\nThanks for using DexBoost! Start another order anytime.`,
+      `🎉 *Order ${o.id} completed!*\n\n${o.packageName ? `${esc(o.packageName)} — ` : ""}${esc(o.token.symbol)} on ${o.token.chain}\n\n` +
+        (o.txLink ? `🔗 On-chain transaction:\n${o.txLink}\n\n` : "") +
+        `Thanks for using DexBoost! Start another order anytime.`,
       { reply_markup: KB_BACK_MAIN() },
     );
   }
@@ -2033,6 +2054,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     },
     notifyOrderPaid,
     notifyOrderExpired,
+    notifyOrderFulfilled,
     notifyUnknownDeposit: async (deposit: Deposit, chainId: string, wallet: string) => {
       await notifyAdmin(
         `⚠️ *Unmatched deposit*\n\n` +

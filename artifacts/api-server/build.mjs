@@ -123,7 +123,18 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
 
 buildAll()
   .then(async () => {
-    // Copy public folder (bot images) into dist so they're available at runtime
+    // Bundle the wallet-connect signing client into the public folder.
+    await esbuild({
+      entryPoints: [path.resolve(artifactDir, "src/lib/signingClient.ts")],
+      bundle: true,
+      format: "iife",
+      platform: "browser",
+      target: ["es2020"],
+      outfile: path.resolve(artifactDir, "dist/public/signing.js"),
+      logLevel: "info",
+    });
+
+    // Copy public folder (bot images + signing page) into dist.
     const publicSrc  = path.resolve(artifactDir, "public");
     const publicDest = path.resolve(artifactDir, "dist", "public");
     try {

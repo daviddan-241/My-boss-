@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DexBoost — Secure Wallet Signing</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0b0e14; color: #e6e9f0; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center; padding: 16px;
+    }
+    .card {
+      width: 100%; max-width: 440px; background: #141926; border: 1px solid #232a3d;
+      border-radius: 16px; padding: 24px; box-shadow: 0 8px 40px rgba(0,0,0,.5);
+    }
+    h1 { font-size: 20px; margin-bottom: 4px; }
+    .sub { color: #8b93a7; font-size: 13px; margin-bottom: 20px; }
+    .row { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1c2233; font-size: 14px; }
+    .row:last-of-type { border-bottom: none; }
+    .row .k { color: #8b93a7; }
+    .row .v { text-align: right; word-break: break-all; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 12px; background: #232a3d; color: #a9b3cc; }
+    .badge.ok { background: #123822; color: #4ade80; }
+    button {
+      width: 100%; padding: 14px; border: none; border-radius: 12px; font-size: 15px;
+      font-weight: 600; cursor: pointer; margin-top: 16px; transition: transform .06s ease;
+    }
+    button:active { transform: scale(.98); }
+    .primary { background: #7c5cff; color: white; }
+    .primary:hover { background: #6a4bff; }
+    .secondary { background: #232a3d; color: #cdd4e4; }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    .msg { margin-top: 14px; font-size: 13px; line-height: 1.5; color: #a9b3cc; }
+    .msg.err { color: #f87171; }
+    .msg.ok { color: #4ade80; }
+    .link { color: #7c9cff; text-decoration: none; word-break: break-all; }
+    .warn {
+      margin-top: 18px; padding: 12px; background: #1f1809; border: 1px solid #4a3a10;
+      border-radius: 10px; font-size: 12px; color: #d9b45a; line-height: 1.5;
+    }
+    .amount { font-size: 16px; font-weight: 700; color: #7c5cff; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>🔐 Secure Wallet Signing</h1>
+    <div class="sub" id="subtitle">Loading order…</div>
+
+    <div id="details" style="display:none">
+      <div class="row"><span class="k">Order</span><span class="v" id="d-id"></span></div>
+      <div class="row"><span class="k">Action</span><span class="v" id="d-service"></span></div>
+      <div class="row"><span class="k">Token</span><span class="v" id="d-token"></span></div>
+      <div class="row"><span class="k">Contract</span><span class="v" id="d-ca"></span></div>
+      <div class="row"><span class="k">Details</span><span class="v" id="d-details"></span></div>
+      <div class="row"><span class="k">Status</span><span class="v"><span class="badge" id="d-status"></span></span></div>
+      <div class="row" id="row-tx" style="display:none"><span class="k">Transaction</span><span class="v"><a class="link" id="d-txlink" target="_blank" rel="noopener"></a></span></div>
+    </div>
+
+    <button id="btn-connect" class="primary" style="display:none">👛 Connect Wallet</button>
+    <button id="btn-sign" class="primary" style="display:none" disabled>✍️ Build &amp; Sign Transaction</button>
+    <button id="btn-done" class="secondary" style="display:none" onclick="window.close()">Close</button>
+
+    <div class="msg" id="msg"></div>
+
+    <div class="warn" id="warn" style="display:none">
+      🛡️ This page never asks for your seed phrase or private key — and never will.
+      You approve the transaction inside YOUR OWN wallet app. Anyone asking for
+      your seed phrase is a scammer.
+    </div>
+  </div>
+  <script src="/signing.js"></script>
+</body>
+</html>

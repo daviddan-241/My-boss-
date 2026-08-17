@@ -104,6 +104,25 @@ pump.fun coins, token-2022 mints, dead pools. Results include the token logo,
 and a fast-path races sources so answers land in ~1.5s even when one API is
 rate-limiting.
 
+**Real wallet signing for Lock Supply / Burn Token:** tapping "🔗 Connect
+Wallet" opens a secure webapp (`/signing`) served by the same Render app. The
+user connects their own wallet (Phantom or any Wallet-Standard wallet) and
+signs the REAL transaction:
+- **Burn** → a real spl-token `Burn` instruction; the supply actually
+  decreases. Amount = min(wallet balance, supply × %).
+- **Lock** → a real on-chain transfer into your `LOCK_VAULT_WALLET`, with the
+  term recorded on the order.
+After signing, the bot verifies the tx on-chain, fulfills the order
+automatically, and sends the Solscan link to the user and to you. The webapp
+never sees or asks for a seed phrase — signing happens inside the user's own
+wallet app.
+
+**New env (required for signing):**
+- `APP_URL` — your app's public URL (e.g. `https://<app>.onrender.com`). The
+  Connect Wallet button links to `{APP_URL}/signing?order=DB-XXXX`.
+- `LOCK_VAULT_WALLET` — the wallet that receives locked tokens (any Solana
+  address you control; keep its key safe for the lock term).
+
 **New env (optional):** `SOLANA_RPC_URL` — powers the on-chain source.
 Defaults to public RPCs (fine), but a **free Helius or QuickNode RPC** is
 strongly recommended for speed and reliability. All other env vars are
