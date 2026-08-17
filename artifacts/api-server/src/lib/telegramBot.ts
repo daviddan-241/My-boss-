@@ -67,6 +67,7 @@ export interface BotHandle {
   processUpdate: (body: unknown) => Promise<void>;
   notifyOrderPaid: (order: Order, deposit: Deposit) => Promise<void>;
   notifyOrderExpired: (order: Order) => Promise<void>;
+  notifyUnknownDeposit: (deposit: Deposit, chainId: string, wallet: string) => Promise<void>;
   stop: () => Promise<void>;
 }
 
@@ -217,6 +218,13 @@ const STATUS_LABEL: Record<Order["status"], string> = {
   expired: "Expired",
   cancelled: "Cancelled",
 };
+
+/** Convert a smallest-unit amount string to a human display string. */
+function displayFromSmallest(amountSmallest: string, chainId: string): string {
+  const decimals = chainId === "solana" || chainId === "ton" ? 9 : 18;
+  const n = Number(amountSmallest) / 10 ** decimals;
+  return fmtAmount(n, currencyForChain(chainId));
+}
 
 function orderCard(o: Order): string {
   const lines = [
@@ -390,6 +398,66 @@ async function sendMsg(
   }
 }
 
+/**
+ * Fetch a token logo for Telegram upload (Telegram's API can't pull remote
+ * URLs itself). Returns null on any failure so callers fall back to text.
+ */
+async function fetchImageBytes(
+  url: string,
+  timeoutMs = 8_000,
+): Promise<{ buf: Buffer; contentType: string; ext: string } | null> {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!res.ok) return null;
+    const contentType = res.headers.get("content-type") ?? "";
+    if (!contentType.startsWith("image/")) return null;
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length === 0 || buf.length > 5 * 1024 * 1024) return null; // cap 5MB
+    const ext = contentType.includes("png")
+      ? "png"
+      : contentType.includes("webp")
+        ? "webp"
+        : contentType.includes("gif")
+          ? "gif"
+          : "jpg";
+    return { buf, contentType, ext };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Send a token result card. When the lookup found a logo (imageUrl), the
+ * card is sent as a real photo with the details as caption — this is what
+ * makes results "feel real". Falls back to plain text if the image can't be
+ * fetched or Telegram rejects it.
+ */
+async function sendTokenCard(
+  bot: TelegramBot,
+  chatId: number | string,
+  t: TokenInfo,
+  opts: TelegramBot.SendPhotoOptions = {},
+): Promise<void> {
+  if (t.imageUrl) {
+    const img = await fetchImageBytes(t.imageUrl);
+    if (img) {
+      try {
+        await bot.sendPhoto(chatId, img.buf, {
+          caption: tokenCard(t),
+          parse_mode: "Markdown",
+          filename: `token.${img.ext}`,
+          contentType: img.contentType,
+          ...opts,
+        } as unknown as TelegramBot.SendPhotoOptions);
+        return;
+      } catch (err) {
+        logger.warn({ err }, "Photo send failed — falling back to text card");
+      }
+    }
+  }
+  await sendMsg(bot, chatId, tokenCard(t), opts as TelegramBot.SendMessageOptions);
+}
+
 // ─── Bot entry point ──────────────────────────────────────────────────────────
 
 export function startTelegramBot(token: string, opts: StartBotOptions): BotHandle {
@@ -531,6 +599,18 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     service: string,
     t: TokenInfo,
   ): Promise<void> {
+    // Service flows need a real contract address (payments are verified
+    // against the token's chain). Name-search results carry no CA.
+    if (!detectChainFormat(t.address)) {
+      await sendMsg(
+        bot,
+        chatId,
+        `❌ I found "${t.symbol}" but not its contract address — services need the actual CA.\n\nPlease send the contract address (not the name):`,
+        { reply_markup: KB_CANCEL() },
+      );
+      await setSession(userId, { step: "awaiting_ca", draft: { service } });
+      return;
+    }
     if (service === "volume") {
       await setSession(userId, {
         step: "volume_package",
@@ -922,6 +1002,20 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
   bot.onText(/^\/start/, async (msg) => {
     const userId = msg.from?.id ?? msg.chat.id;
     botLog.info({ userId }, "User started bot");
+
+    // Real admin visibility: every new user is reported to the operator.
+    const from = msg.from;
+    const fullName = [from?.first_name, from?.last_name].filter(Boolean).join(" ") || "—";
+    const username = from?.username ? `@${from.username}` : "—";
+    await notifyAdmin(
+      `👤 *New user*\n\n` +
+        `🆔 ID: \`${userId}\`\n` +
+        `👤 Name: ${esc(fullName)}\n` +
+        `🔖 Username: ${esc(username)}\n` +
+        `🌐 Language: ${from?.language_code ?? "—"}\n` +
+        `📅 ${new Date().toUTCString()}`,
+    );
+
     await sendMainMenu(msg.chat.id, userId);
   });
 
@@ -930,7 +1024,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     const arg = match?.[1]?.trim();
     if (arg) {
       const t = await runVerify(msg.chat.id, userId, arg);
-      if (t) await sendMsg(bot, msg.chat.id, tokenCard(t), { reply_markup: KB_BACK_MAIN() });
+      if (t) await sendTokenCard(bot, msg.chat.id, t, { reply_markup: KB_BACK_MAIN() });
     } else {
       await setSession(userId, { step: "awaiting_ca" });
       await sendMsg(
@@ -1200,12 +1294,12 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     // Generic lookup shortcut (no active flow)
     if (session.step === "awaiting_ca") {
       const t = await runVerify(chatId, userId, msg.text, session.chainHint);
-      if (t) await sendMsg(bot, chatId, tokenCard(t), { reply_markup: KB_BACK_MAIN() });
+      if (t) await sendTokenCard(bot, chatId, t, { reply_markup: KB_BACK_MAIN() });
       return;
     }
     if (msg.text.length <= 120) {
       const t = await runVerify(chatId, userId, msg.text);
-      if (t) await sendMsg(bot, chatId, tokenCard(t), { reply_markup: KB_BACK_MAIN() });
+      if (t) await sendTokenCard(bot, chatId, t, { reply_markup: KB_BACK_MAIN() });
     }
   });
 
@@ -1387,7 +1481,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
       const t = await runVerify(chatId, userId, session.pendingAddress, chainId);
       if (t) {
         if (service) await afterVerify(chatId, userId, service, t);
-        else await sendMsg(bot, chatId, tokenCard(t), { reply_markup: KB_BACK_MAIN() });
+        else await sendTokenCard(bot, chatId, t, { reply_markup: KB_BACK_MAIN() });
       }
       return;
     }
@@ -1473,6 +1567,16 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     },
     notifyOrderPaid,
     notifyOrderExpired,
+    notifyUnknownDeposit: async (deposit: Deposit, chainId: string, wallet: string) => {
+      await notifyAdmin(
+        `⚠️ *Unmatched deposit*\n\n` +
+          `🔗 Chain: ${chainId}\n` +
+          `💳 Wallet: \`${wallet}\`\n` +
+          `💵 Amount: ${displayFromSmallest(deposit.amountSmallest, chainId)}\n` +
+          `🔗 ${deposit.link ?? "—"}\n\n` +
+          `No open order matches this transaction — check /orders (wrong amount or late payment?).`,
+      );
+    },
     stop: async () => {
       clearInterval(pruneTimer);
       if (opts.mode === "webhook" && webhookUrl) {

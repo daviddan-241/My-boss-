@@ -90,6 +90,23 @@ timestamp within the order window. Partial payments are rejected by the
 matcher and only visible to you via the chain — refunds/manual fixes are your
 admin call.
 
+**Admin DMs cover everything real**: every new user who opens the bot,
+every order created, every confirmed payment (with explorer link + inline
+Approve/Reject buttons), every **unmatched deposit** (wrong amount / late
+payment — includes amount and tx link), expiries, and bot online/offline
+pings.
+
+**Lookups always try everywhere** — DexScreener, PumpFun, GeckoTerminal,
+CoinGecko, Birdeye, Jupiter, Moralis — with logo/image retrieval and an
+enrichment pass (GeckoTerminal/CoinGecko contract lookups) so results include
+the token image. Old coins from years ago resolve too, since contract-based
+sources don't depend on recent trading activity.
+
+**Built-in self-warm keep-alive**: the server pings its own `/api/healthz`
+every 5 minutes by default (override with `KEEPALIVE_URL`). This keeps the
+process warm but cannot wake a *slept* instance — that's what the UptimeRobot
+monitor does. Combined, the bot stays up.
+
 ## 6. Admin commands
 
 | Command | What it does |

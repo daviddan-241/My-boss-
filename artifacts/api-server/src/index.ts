@@ -84,6 +84,8 @@ async function main(): Promise<void> {
       {
         onPaid: (order, deposit) => botHandle!.notifyOrderPaid(order, deposit),
         onExpired: (order) => botHandle!.notifyOrderExpired(order),
+        onUnknownDeposit: (deposit, chainId, wallet) =>
+          botHandle!.notifyUnknownDeposit(deposit, chainId, wallet),
       },
       env.paymentPollIntervalMs,
     );
@@ -95,20 +97,25 @@ async function main(): Promise<void> {
     );
   }
 
-  // 6. Keep-alive self-ping (see DEPLOY.md — external cron pings are the real
-  //    keep-alive for sleeping free tiers).
+  // 6. Keep-alive self-ping. Defaults to pinging OUR OWN /api/healthz — this
+  //    keeps the process warm (sockets, GC) on hosts that kill idle
+  //    connections. NOTE: it cannot wake a slept instance (a sleeping app
+  //    can't ping itself) — for Render free that's what the external
+  //    UptimeRobot monitor is for (see DEPLOY.md).
+  const keepAliveUrl = env.keepAliveUrl ?? `http://127.0.0.1:${env.port}/api/healthz`;
   let keepAliveTimer: NodeJS.Timeout | null = null;
-  if (env.keepAliveUrl) {
-    keepAliveTimer = setInterval(() => {
-      fetch(env.keepAliveUrl!)
-        .then((r) => {
-          if (!r.ok) logger.warn({ status: r.status }, "Keep-alive ping failed");
-        })
-        .catch((err) => logger.warn({ err }, "Keep-alive ping error"));
-    }, env.keepAliveIntervalMs);
-    keepAliveTimer.unref();
-    logger.info({ url: env.keepAliveUrl, intervalMs: env.keepAliveIntervalMs }, "Keep-alive enabled");
-  }
+  keepAliveTimer = setInterval(() => {
+    fetch(keepAliveUrl)
+      .then((r) => {
+        if (!r.ok) logger.warn({ status: r.status }, "Keep-alive ping failed");
+      })
+      .catch((err) => logger.warn({ err }, "Keep-alive ping error"));
+  }, env.keepAliveIntervalMs);
+  keepAliveTimer.unref();
+  logger.info(
+    { url: keepAliveUrl, intervalMs: env.keepAliveIntervalMs, external: !!env.keepAliveUrl },
+    "Keep-alive enabled",
+  );
 
   // 7. Graceful shutdown.
   let shuttingDown = false;

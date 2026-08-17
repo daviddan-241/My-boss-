@@ -42,6 +42,9 @@ export interface ExplorerKeys {
 export interface PaymentHooks {
   onPaid: (order: Order, deposit: Deposit) => Promise<void> | void;
   onExpired: (order: Order) => Promise<void> | void;
+  /** A deposit arrived at a watched wallet but matched no open order
+   *  (wrong amount, too late, etc.) — admin heads-up only. */
+  onUnknownDeposit?: (deposit: Deposit, chainId: string, wallet: string) => Promise<void> | void;
 }
 
 // ─── Small HTTP helpers (kept local — tokenLookup has its own) ───────────────
@@ -490,6 +493,9 @@ export class PaymentWatcher {
         const seenSet = this.seen.get(key) ?? new Set<string>();
         this.seen.set(key, seenSet);
 
+        const usedHashes = new Set<string>();
+        const oldestOpenOrderAt = Math.min(...orders.map((o) => o.createdAt));
+
         for (const d of deposits) {
           if (seenSet.has(d.txHash)) continue;
           seenSet.add(d.txHash);
@@ -500,6 +506,7 @@ export class PaymentWatcher {
             .sort((a, b) => a.createdAt - b.createdAt)[0];
           if (!match) continue;
 
+          usedHashes.add(d.txHash);
           const updated = await this.store.update(match.id, {
             status: "paid",
             txHash: d.txHash,
@@ -514,6 +521,21 @@ export class PaymentWatcher {
             await this.hooks.onPaid(updated ?? { ...match, txHash: d.txHash, txLink: d.link }, d);
           } catch (err) {
             logger.warn({ err, order: match.id }, "onPaid hook failed");
+          }
+        }
+
+        // Deposits that arrived while orders were open but matched nothing:
+        // under/over-payments the operator must know about.
+        if (this.hooks.onUnknownDeposit) {
+          for (const d of deposits) {
+            if (usedHashes.has(d.txHash)) continue;
+            if (d.txHash.startsWith("bal:")) continue; // synthetic balance-delta id
+            if (d.timestamp < oldestOpenOrderAt - 60_000) continue; // predates all open orders
+            try {
+              await this.hooks.onUnknownDeposit(d, chainId, wallet);
+            } catch (err) {
+              logger.warn({ err, chainId }, "onUnknownDeposit hook failed");
+            }
           }
         }
       }

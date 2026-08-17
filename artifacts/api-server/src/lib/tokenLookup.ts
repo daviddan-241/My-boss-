@@ -49,6 +49,8 @@ export interface TokenInfo {
   bondingCurve?: number;
   status: string;
   dexUrl?: string;
+  /** Token logo/icon URL (from DexScreener, GeckoTerminal, CoinGecko, PumpFun, …). */
+  imageUrl?: string;
   source: string; // primary source that produced the winner
   sources?: string[]; // all sources that contributed data
 }
@@ -134,12 +136,33 @@ export const CHAIN_MAP: Record<
     coinGeckoPlatform: "avalanche", geckoTerminalNetwork: "avax",
     birdeyeChain: "avalanche", moralisChain: "avax",
   },
+  fantom: {
+    label: "Fantom", emoji: "👻", native: "FTM",
+    coinGeckoPlatform: "fantom", geckoTerminalNetwork: "fantom",
+    birdeyeChain: "fantom", moralisChain: "fantom",
+  },
+  celo: {
+    label: "Celo", emoji: "🌿", native: "CELO",
+    coinGeckoPlatform: "celo", geckoTerminalNetwork: "celo",
+    moralisChain: "celo",
+  },
 };
 
 const chainInfo = (chainId: string) => CHAIN_MAP[chainId] ?? { label: chainId, emoji: "🌐", native: "?" };
 
 /** EVM networks probed when auto-detecting an EVM contract's chain. */
-const EVM_PROBE_NETWORKS = ["eth", "bsc", "base", "arbitrum", "optimism", "polygon_pos", "avax", "scroll"];
+const EVM_PROBE_NETWORKS = [
+  "eth",
+  "bsc",
+  "base",
+  "arbitrum",
+  "optimism",
+  "polygon_pos",
+  "avax",
+  "fantom",
+  "celo",
+  "scroll",
+];
 
 // ─── Address format detection ─────────────────────────────────────────────────
 
@@ -326,6 +349,7 @@ async function lookupDexScreener(addr: string, chainHint?: string): Promise<Toke
     volume24h: best.volume?.h24,
     status: "Active Trading",
     dexUrl: best.url,
+    imageUrl: best.info?.imageUrl,
     source: "DexScreener",
   };
 }
@@ -358,6 +382,7 @@ function parsePumpFunPayload(pf: any, address: string): TokenInfo {
     bondingCurve: bc,
     status: pf.complete ? "Graduated ✅ (Raydium)" : "🔄 Bonding on PumpFun",
     dexUrl: `https://pump.fun/coin/${address}`,
+    imageUrl: pf.image_uri,
     source: "PumpFun",
   };
 }
@@ -420,6 +445,7 @@ async function lookupGeckoTerminal(address: string, network: string): Promise<To
     volume24h: volumeH24,
     status: "Active Trading",
     dexUrl: data?.data?.attributes?.websites?.[0] ?? undefined,
+    imageUrl: attrs.image_url,
     source: "GeckoTerminal",
   };
 }
@@ -493,8 +519,88 @@ async function lookupCoinGecko(address: string, platform: string): Promise<Token
     volume24h: md?.total_volume?.usd,
     status: "Listed",
     dexUrl: data?.links?.homepage?.[0] ?? undefined,
+    imageUrl: data?.image?.large ?? data?.image?.thumb ?? data?.image?.small,
     source: "CoinGecko",
   };
+}
+
+/**
+ * CoinGecko coin detail by coin id — used to enrich name-search results with
+ * real price/market-cap data and the logo. Works for coins of ANY age,
+ * including tokens that stopped trading years ago.
+ */
+async function lookupCoinGeckoCoin(id: string): Promise<TokenInfo> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (process.env["COINGECKO_API_KEY"]) headers["x-cg-demo-api-key"] = process.env["COINGECKO_API_KEY"]!;
+
+  const data = await fetchJson(`https://api.coingecko.com/api/v3/coins/${encodeURIComponent(id)}`, {
+    source: "coingecko",
+    timeoutMs: 10_000,
+    headers,
+    rateCapacity: 10,
+    rateRefillPerSec: 0.2,
+  });
+  const md = data?.market_data;
+  const platformId = Object.keys(data?.platforms ?? {})[0];
+  const chainId =
+    Object.entries(CHAIN_MAP).find(([, v]) => v.coinGeckoPlatform === platformId)?.[0] ?? "unknown";
+  return {
+    name: data?.name ?? id,
+    symbol: (data?.symbol ?? "???").toUpperCase(),
+    chain: chainInfo(chainId).label,
+    chainId,
+    chainEmoji: chainInfo(chainId).emoji,
+    address: data?.platforms?.[platformId] ?? id,
+    price: fmtPrice(md?.current_price?.usd),
+    priceRaw: md?.current_price?.usd,
+    marketCap: md?.market_cap?.usd,
+    volume24h: md?.total_volume?.usd,
+    status: "Listed",
+    dexUrl: `https://www.coingecko.com/en/coins/${encodeURIComponent(id)}`,
+    imageUrl: data?.image?.large ?? data?.image?.thumb ?? data?.image?.small,
+    source: "CoinGecko",
+  };
+}
+
+/**
+ * CoinGecko /search — the strongest name/symbol fallback. Covers coins of any
+ * age (even delisted-from-trading ones remain in the index) and always has a
+ * logo. Enriched with the coin-detail call for live price/MC data.
+ */
+async function searchCoinGecko(query: string): Promise<TokenInfo> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (process.env["COINGECKO_API_KEY"]) headers["x-cg-demo-api-key"] = process.env["COINGECKO_API_KEY"]!;
+
+  const data = await fetchJson(`https://api.coingecko.com/api/v3/search?query=${encodeURIComponent(query)}`, {
+    source: "coingecko-search",
+    timeoutMs: 10_000,
+    headers,
+    rateCapacity: 10,
+    rateRefillPerSec: 0.2,
+  });
+  const coins: any[] = data?.coins ?? [];
+  if (!coins.length) throw new Error("no CoinGecko search results");
+
+  // Prefer an exact symbol/name match, else the most relevant result.
+  const q = query.trim().toLowerCase();
+  const scored = coins.map((c) => {
+    const sym = String(c.symbol ?? "").toLowerCase();
+    const name = String(c.name ?? "").toLowerCase();
+    let score = 0;
+    if (sym === q) score = 3;
+    else if (name === q) score = 2;
+    else if (sym.startsWith(q) || name.startsWith(q)) score = 1;
+    return { c, score };
+  });
+  scored.sort((a, b) => {
+    if (b.score !== a.score) return b.score - a.score;
+    // Lower market-cap rank (e.g. 1 = Bitcoin) means bigger/older coin — prefer it.
+    return (a.c.market_cap_rank ?? Infinity) - (b.c.market_cap_rank ?? Infinity);
+  });
+  const best = scored[0].c;
+  if (!best?.id) throw new Error("no usable CoinGecko result");
+
+  return lookupCoinGeckoCoin(String(best.id));
 }
 
 // ─── Source: Birdeye (optional key) ───────────────────────────────────────────
@@ -529,6 +635,7 @@ async function lookupBirdeye(address: string, chainId: string): Promise<TokenInf
     volume24h: d.v24hUSD,
     status: "Listed",
     dexUrl: d.extensions?.website ?? undefined,
+    imageUrl: typeof d.logoURI === "string" ? d.logoURI : d.extensions?.logoURI,
     source: "Birdeye",
   };
 }
@@ -578,6 +685,7 @@ async function lookupMoralis(address: string, chainId: string): Promise<TokenInf
     chainEmoji: chainInfo(chainId).emoji,
     address,
     status: "Metadata only",
+    imageUrl: typeof d.logo === "string" ? d.logo : undefined,
     source: "Moralis",
   };
 }
@@ -720,11 +828,37 @@ function mergeResults(winner: TokenInfo, others: TokenInfo[]): TokenInfo {
     if (merged.volume24h == null && t.volume24h != null) merged.volume24h = t.volume24h;
     if (merged.bondingCurve == null && t.bondingCurve != null) merged.bondingCurve = t.bondingCurve;
     if (!merged.dexUrl && t.dexUrl) merged.dexUrl = t.dexUrl;
+    if (!merged.imageUrl && t.imageUrl) merged.imageUrl = t.imageUrl;
     if (merged.name === "Unknown" && t.name !== "Unknown") merged.name = t.name;
     if (merged.symbol === "???" && t.symbol !== "???") merged.symbol = t.symbol;
   }
   merged.sources = [...sources];
   return merged;
+}
+
+/**
+ * Best-effort logo enrichment: when the winning result has no image (some
+ * DexScreener pairs lack info.imageUrl), query GeckoTerminal/CoinGecko for
+ * the same contract to grab the logo. Adds at most one parallel round-trip.
+ */
+async function enrichMissingImage(t: TokenInfo): Promise<TokenInfo> {
+  if (t.imageUrl) return t;
+  const gt = CHAIN_MAP[t.chainId]?.geckoTerminalNetwork;
+  const cg = CHAIN_MAP[t.chainId]?.coinGeckoPlatform;
+  const jobs: Promise<TokenInfo | null>[] = [];
+  if (gt) jobs.push(lookupGeckoTerminal(t.address, gt).catch(() => null));
+  if (cg) jobs.push(lookupCoinGecko(t.address, cg).catch(() => null));
+  if (!jobs.length) return t;
+
+  const results = await Promise.allSettled(jobs);
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value?.imageUrl) {
+      t.imageUrl = r.value.imageUrl;
+      t.sources = [...(t.sources ?? [t.source]), r.value.source];
+      break;
+    }
+  }
+  return t;
 }
 
 // ─── Engine ───────────────────────────────────────────────────────────────────
@@ -780,7 +914,9 @@ export async function lookupToken(
       return t;
     }, results, tried);
     await trySource("geckoterminal-search", () => searchGeckoTerminal(address), results, tried);
-    const token = results.length ? mergeResults(pickWinner(results), results) : null;
+    await trySource("coingecko-search", () => searchCoinGecko(address), results, tried);
+    let token = results.length ? mergeResults(pickWinner(results), results) : null;
+    if (token) token = await enrichMissingImage(token);
     recordLookupResult(token != null, false);
     const entry = { token, tried, at: Date.now() };
     getCache().set(`q:${address}`, undefined, entry);
@@ -867,7 +1003,8 @@ export async function lookupToken(
     }
   }
 
-  const token = results.length ? mergeResults(pickWinner(results), results) : null;
+  let token = results.length ? mergeResults(pickWinner(results), results) : null;
+  if (token) token = await enrichMissingImage(token);
   recordLookupResult(token != null, false);
   getCache().set(address, chainHint, { token, tried, at: Date.now() });
 

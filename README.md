@@ -34,6 +34,15 @@ confirmed → admin notified with the tx link → admin approves → user gets t
 completion message. Expired/cancelled/rejected states are all handled and
 reported honestly.
 
+**Admin visibility** (all real events hit `ADMIN_CHAT_ID`): new users,
+orders created, payments confirmed (with tx link), unmatched/underpaid
+deposits, expired orders, and bot online/offline status.
+
+**Lookup engine**: results always try every source — DexScreener, PumpFun,
+GeckoTerminal, CoinGecko, Birdeye, Jupiter, Moralis — including **token
+logos** (image-enrichment pass) and **old/inactive coins** (CoinGecko &
+GeckoTerminal contract lookups don't depend on recent trading activity).
+
 **Web dashboard** (`artifacts/dex-boost-tracker`) — React app showing
 latest/top boosted tokens with 30s auto-refresh, chain filters, search and a
 token detail modal.
