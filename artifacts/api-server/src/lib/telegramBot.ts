@@ -41,6 +41,8 @@ const PUBLIC_DIR = path.resolve(
 
 const IMG_WELCOME = path.join(PUBLIC_DIR, "welcome.jpeg");
 const IMG_LOGO = path.join(PUBLIC_DIR, "dex-logo.jpeg");
+const IMG_LOCKER = path.join(PUBLIC_DIR, "supply-locker.jpeg");
+const IMG_BURNER = path.join(PUBLIC_DIR, "supply-burner.jpeg");
 
 // ─── Bot configuration ────────────────────────────────────────────────────────
 
@@ -226,6 +228,14 @@ function displayFromSmallest(amountSmallest: string, chainId: string): string {
   return fmtAmount(n, currencyForChain(chainId));
 }
 
+/** Status label that reads correctly for free lock/burn requests too. */
+function statusLabelFor(o: Order): string {
+  if ((o.service === "lock_supply" || o.service === "burn") && o.status === "paid") {
+    return "Requested — in progress";
+  }
+  return STATUS_LABEL[o.status];
+}
+
 function orderCard(o: Order): string {
   const lines = [
     `🧾 Order \`${o.id}\``,
@@ -233,12 +243,13 @@ function orderCard(o: Order): string {
     `📋 Service: ${o.service.replace(/_/g, " ")}${o.packageName ? ` — ${o.packageName}` : ""}`,
     `🎯 Token: ${esc(o.token.symbol)} on ${o.token.chain}`,
     `📍 CA: \`${esc(addrShort(o.token.address))}\``,
-    `💵 Amount: *${fmtAmount(o.amount, o.currency)}*`,
   ];
+  // Lock/burn requests carry no payment amount.
+  if (o.amountSmallest !== "0") lines.push(`💵 Amount: *${fmtAmount(o.amount, o.currency)}*`);
   if (o.details) {
     for (const [k, v] of Object.entries(o.details)) lines.push(`${k}: ${esc(v)}`);
   }
-  lines.push(``, `${STATUS_EMOJI[o.status]} Status: ${STATUS_LABEL[o.status]}`);
+  lines.push(``, `${STATUS_EMOJI[o.status]} Status: ${statusLabelFor(o)}`);
   if (o.status === "awaiting_payment") {
     lines.push(`💳 Wallet: \`${esc(o.wallet)}\``);
     const mins = Math.max(0, Math.round((o.expiresAt - Date.now()) / 60_000));
@@ -312,12 +323,22 @@ function walletCopyBtn(wallet: string): Btn {
 
 const KB_MAIN = () =>
   kb([
-    [{ text: "🔍 Check Token", callback_data: "check_token" }],
     [
-      { text: "📦 Volume Packages", callback_data: "vol_start" },
-      { text: "📊 DEX Services", callback_data: "dex_menu" },
+      { text: "🚀 Start Volume Bot", callback_data: "vol_start" },
+      { text: "◼️ Stop Volume Bot", callback_data: "vol_stop" },
     ],
-    [{ text: "📋 My Order", callback_data: "order_status" }],
+    [
+      { text: "📦 Volume Packages", callback_data: "volume_packages" },
+      { text: "🎯 DEX Services", callback_data: "dex_menu" },
+    ],
+    [
+      { text: "🔒 Lock Supply", callback_data: "lock_supply" },
+      { text: "🔥 Burn Token", callback_data: "burn_token" },
+    ],
+    [
+      { text: "🔍 Check Token", callback_data: "check_token" },
+      { text: "📋 My Order", callback_data: "order_status" },
+    ],
     [
       { text: "📰 Latest Boosts", callback_data: "boost_latest" },
       { text: "🏆 Top Boosts", callback_data: "boost_top" },
@@ -341,6 +362,73 @@ const KB_TRENDING_TIER = () =>
     [{ text: "🥉 Top 10 Trending", callback_data: "trending_top10" }],
     [{ text: "🥇 Top 3 Trending", callback_data: "trending_top3" }],
     [{ text: "❌ Cancel", callback_data: "cancel" }],
+  ]);
+
+/** Package buttons shown in the "Volume Packages" menu — start the flow directly. */
+const KB_PACKAGES_START = () =>
+  kb([
+    [
+      { text: "💎 Starter", callback_data: "pkg_starter" },
+      { text: "📦 Basic", callback_data: "pkg_basic" },
+    ],
+    [
+      { text: "🥉 Bronze", callback_data: "pkg_bronze" },
+      { text: "🔥 Premium", callback_data: "pkg_premium" },
+    ],
+    [
+      { text: "💎 VIP", callback_data: "pkg_vip" },
+      { text: "🎯 Custom", callback_data: "pkg_custom" },
+    ],
+    [{ text: "⬅️ Back to Main", callback_data: "back_main" }],
+  ]);
+
+const KB_LOCK_PCT = () =>
+  kb([
+    [
+      { text: "25%", callback_data: "lock_pct_25" },
+      { text: "50%", callback_data: "lock_pct_50" },
+    ],
+    [
+      { text: "75%", callback_data: "lock_pct_75" },
+      { text: "100%", callback_data: "lock_pct_100" },
+    ],
+    [{ text: "✏️ Custom", callback_data: "lock_pct_custom" }],
+    [{ text: "❌ Cancel", callback_data: "cancel" }],
+  ]);
+
+const KB_LOCK_DUR = () =>
+  kb([
+    [
+      { text: "1 Month", callback_data: "lock_dur_1m" },
+      { text: "3 Months", callback_data: "lock_dur_3m" },
+    ],
+    [
+      { text: "6 Months", callback_data: "lock_dur_6m" },
+      { text: "1 Year", callback_data: "lock_dur_1y" },
+    ],
+    [{ text: "✏️ Custom", callback_data: "lock_dur_custom" }],
+    [{ text: "❌ Cancel", callback_data: "cancel" }],
+  ]);
+
+const KB_BURN_PCT = () =>
+  kb([
+    [
+      { text: "25%", callback_data: "burn_pct_25" },
+      { text: "50%", callback_data: "burn_pct_50" },
+    ],
+    [
+      { text: "75%", callback_data: "burn_pct_75" },
+      { text: "100%", callback_data: "burn_pct_100" },
+    ],
+    [{ text: "✏️ Custom", callback_data: "burn_pct_custom" }],
+    [{ text: "❌ Cancel", callback_data: "cancel" }],
+  ]);
+
+/** Connect Wallet — the REAL, safe version: no seed phrases, ever. */
+const KB_CONNECT_WALLET = () =>
+  kb([
+    [{ text: "🔗 Connect Wallet", callback_data: "connect_wallet" }],
+    [{ text: "⬅️ Back to Main", callback_data: "back_main" }],
   ]);
 
 const KB_SKIP_CANCEL = () =>
@@ -529,7 +617,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
       bot,
       chatId,
       IMG_WELCOME,
-      `🦅 DexBoost — Token Growth Services\n\n🔍 Free multi-source token lookup\n📦 Volume packages on SOL • ETH • BNB • BASE • TON\n📊 DEX update, ads & trending campaigns\n\n💳 Payments are verified *on-chain* — you get a real order with an ID, and confirmation lands in this chat the moment your transaction is detected. No "I paid" buttons, no guesswork.\n\n⚠️ We will never ask for your seed phrase or private key. Anyone who does is a scammer.`,
+      `🚀 DEX Volume Bot — Multi-Chain Elite Volume Booster\n\n💎 Real Volume • Whale Attraction • Instant DEX Ranking\n\n🌐 Supported Chains:\n⊙ Solana  •  Ξ Ethereum  •  ⬡ BNB Chain  •  🔷 Base  •  💎 TON\n\n🎯 Why Whales Choose Volume-Rich Tokens:\n• Trending tokens get premium attention\n• Consistent activity signals project legitimacy\n• DEX algorithms favor high-volume tokens\n\n💳 Payments are verified *on-chain* — real orders, real confirmations.\n\n⚠️ We will never ask for your seed phrase or private key. Anyone who does is a scammer.`,
       { reply_markup: KB_MAIN() },
     );
   }
@@ -612,6 +700,25 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
       return;
     }
     if (service === "volume") {
+      const session = await getSession(userId);
+      const pkgId = session.draft?.packageId;
+      if (typeof pkgId === "string" && pkgId !== "custom") {
+        const pkg = PACKAGES.find((p) => p.id === pkgId);
+        if (pkg) {
+          await createVolumeOrder(chatId, userId, pkg, t);
+          return;
+        }
+      }
+      if (pkgId === "custom") {
+        await setSession(userId, { step: "custom_amount", draft: { service, token: tokenRef(t) } });
+        await sendMsg(
+          bot,
+          chatId,
+          `🎯 Custom package\n\nEnter the amount of ${currencyForChain(t.chainId)} you want to spend (e.g. 3.5).\n• 50,000 volume per 1 native token`,
+          { reply_markup: KB_CANCEL() },
+        );
+        return;
+      }
       await setSession(userId, {
         step: "volume_package",
         draft: { service, token: tokenRef(t) },
@@ -642,10 +749,146 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
         `${tokenCard(t)}\n\n🔥 DEX Trending — duration\n\n🥉 Top 10: 0.5 native/hour (min 3h)\n🥇 Top 3: 1 native/hour (min 1h)\n\nHow many hours do you want trending? (enter a number)`,
         { reply_markup: KB_CANCEL() },
       );
+    } else if (service === "lock_supply") {
+      await setSession(userId, {
+        step: "lock_percent",
+        draft: { service, token: tokenRef(t) },
+      });
+      await sendLockPercent(chatId, t);
+    } else if (service === "burn") {
+      await setSession(userId, {
+        step: "burn_percent",
+        draft: { service, token: tokenRef(t) },
+      });
+      await sendBurnPercent(chatId, t);
     }
   }
 
+  // ── Lock Supply flow (REAL rails: order logged, admin sends a secure
+  //    signing link — no seed phrases, ever) ──────────────────────────────────
+  async function sendLockPercent(chatId: number | string, t: TokenInfo): Promise<void> {
+    await sendPhoto(
+      bot,
+      chatId,
+      IMG_LOCKER,
+      `${tokenCard(t)}\n\n🔒 Lock Supply\n\n📍 Step 2/3: Choose the percentage to lock:`,
+      { reply_markup: KB_LOCK_PCT() },
+    );
+  }
+
+  async function sendLockDuration(chatId: number | string, t: TokenInfo): Promise<void> {
+    await sendPhoto(
+      bot,
+      chatId,
+      IMG_LOCKER,
+      `${tokenCard(t)}\n\n📅 Lock Duration\n\n📍 Step 2/3: Choose how long the supply will be locked:`,
+      { reply_markup: KB_LOCK_DUR() },
+    );
+  }
+
+  async function sendLockSummary(chatId: number | string, t: TokenInfo, pct: number, dur: string): Promise<void> {
+    await sendPhoto(
+      bot,
+      chatId,
+      IMG_LOCKER,
+      `${tokenCard(t)}\n\n🔒 Lock Summary\n\n⏰ Lock Duration: ${dur}\n🎯 Target % to Lock: ${pct}%\n\n📍 Step 3/3: Connect your wallet to sign the transaction.`,
+      { reply_markup: KB_CONNECT_WALLET() },
+    );
+  }
+
+  // ── Burn Token flow ────────────────────────────────────────────────────────
+  async function sendBurnPercent(chatId: number | string, t: TokenInfo): Promise<void> {
+    await sendPhoto(
+      bot,
+      chatId,
+      IMG_BURNER,
+      `${tokenCard(t)}\n\n🔥 Burn Token\n\n📍 Step 2/3: Choose the percentage to burn:`,
+      { reply_markup: KB_BURN_PCT() },
+    );
+  }
+
+  async function sendBurnSummary(chatId: number | string, t: TokenInfo, pct: number): Promise<void> {
+    await sendPhoto(
+      bot,
+      chatId,
+      IMG_BURNER,
+      `${tokenCard(t)}\n\n🔥 Burn Summary\n\n🎯 Target % to Burn: ${pct}%\n\n📍 Step 3/3: Connect your wallet to sign the transaction.`,
+      { reply_markup: KB_CONNECT_WALLET() },
+    );
+  }
+
+  /**
+   * Finalize a lock/burn request: create a real order (zero payment — the
+   * operator reviews it), notify admin, and send the user the REAL wallet
+   * connection instructions. Signing always happens in the user's own
+   * wallet via a secure link — never by sharing credentials in chat.
+   */
+  async function createLockBurnRequest(
+    chatId: number,
+    userId: number,
+    service: "lock_supply" | "burn",
+    t: TokenInfo,
+    details: Record<string, string>,
+    pkgName: string,
+  ): Promise<void> {
+    const currency = currencyForChain(t.chainId);
+    const order: Order = {
+      id: newOrderId(),
+      userId,
+      chatId,
+      service,
+      packageName: pkgName,
+      token: tokenRef(t),
+      amount: 0,
+      amountSmallest: "0",
+      currency,
+      chainId: t.chainId as Order["chainId"],
+      wallet: "—",
+      status: "paid", // no payment required — request is queued for review
+      paidAt: Date.now(),
+      createdAt: Date.now(),
+      expiresAt: Date.now() + payment.orderExpiryHours * 3_600_000,
+      details,
+    };
+    await orderStore.create(order);
+
+    await sendMsg(
+      bot,
+      chatId,
+      `🔐 Wallet Connection (Secure)\n\n` +
+        `✅ Request \`${order.id}\` logged!\n\n` +
+        `${pkgName} — ${esc(t.symbol)} on ${t.chain}\n` +
+        `📍 CA: \`${esc(addrShort(t.address))}\`\n\n` +
+        `⏳ Our team will review and send you a *secure signing link*.\n` +
+        `You approve the transaction with YOUR wallet — one tap, nothing else.\n\n` +
+        `🛡 NEVER share your seed phrase or private key with anyone — not with us, not with anyone. We will never ask. Anyone asking is a scammer.\n\n` +
+        `📋 Track it anytime with /order or the "📋 My Order" button.`,
+      { reply_markup: KB_BACK_MAIN() },
+    );
+
+    await notifyAdmin(
+      `${service === "burn" ? "🔥" : "🔒"} *New ${service === "burn" ? "Burn" : "Lock"} Request* — order \`${order.id}\`\n\n` +
+        `👤 User: \`${userId}\`\n` +
+        `🎯 Token: ${esc(t.symbol)} (${t.chain})\n` +
+        `📍 CA: \`${t.address}\`\n` +
+        `💰 MC: ${t.marketCap ? fmtUsd(t.marketCap) : "—"}\n` +
+        Object.entries(details).map(([k, v]) => `${k}: ${esc(v)}`).join("\n") +
+        `\n\n⚡ Action: send the user a secure wallet-connect signing link, then /approve ${order.id}`,
+      adminActionKeyboard(order.id),
+    );
+    await clearSession(userId);
+  }
+
   // ── Volume flow ────────────────────────────────────────────────────────────
+
+  /** Full pricing menu (the "📦 Volume Packages" button / /volume command). */
+  function volumePackagesText(): string {
+    return `📦 Premium Volume Packages\n\n🔥 Choose Your Perfect Package:\n\n${PACKAGES.map(
+      (p) =>
+        `${p.emoji} ${p.name}\n• ⊙ SOL: ${p.sol} SOL → ${p.volume.toLocaleString()} Volume (${p.duration})\n• ⬡ BNB: ${p.bnb} BNB\n• Ξ ETH / 🔷 Base: ${p.eth} ETH\n• 💎 TON: ${p.ton} TON`,
+    ).join("\n\n")}\n\n🎯 CUSTOM — Your Amount\n• 50,000 volume per native token\n• Flexible duration`;
+  }
+
   async function sendPackageChoice(chatId: number | string, t: TokenInfo): Promise<void> {
     const currency = currencyForChain(t.chainId);
     const rows: Btn[][] = [];
@@ -663,16 +906,16 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     rows.push([{ text: "🎯 Custom amount", callback_data: "pkg_custom" }]);
     rows.push([{ text: "❌ Cancel", callback_data: "cancel" }]);
 
-  const menuLines = PACKAGES.map((p) => {
-    const { amount } = pkgPrice(p, t.chainId);
-    return `${p.emoji} ${p.name} — ${fmtAmount(amount, currency)} → ${(p.volume / 1000).toFixed(0)}K volume (${p.duration})`;
-  });
-  await sendMsg(
-    bot,
-    chatId,
-    `${tokenCard(t)}\n\n📦 Volume Packages (${t.chain})\n\nChoose a package — prices in ${currency}:\n\n${menuLines.join("\n")}\n\n🎯 Custom — 50K volume per native token\n\nPick a package:`,
-    { reply_markup: kb(rows) },
-  );
+    const menuLines = PACKAGES.map((p) => {
+      const { amount } = pkgPrice(p, t.chainId);
+      return `${p.emoji} ${p.name} — ${fmtAmount(amount, currency)} → ${(p.volume / 1000).toFixed(0)}K volume (${p.duration})`;
+    });
+    await sendMsg(
+      bot,
+      chatId,
+      `${tokenCard(t)}\n\n📊 Progress: 67%\n${progressBar(67)}\nStep 2/3: Package Selection\n\n🎯 Choose your volume package (${t.chain}):\n\n${menuLines.join("\n")}\n\n🎯 Custom — 50K volume per native token\n\nPick a package:`,
+      { reply_markup: kb(rows) },
+    );
   }
 
   async function createVolumeOrder(
@@ -989,6 +1232,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
   // ── Commands ───────────────────────────────────────────────────────────────
   bot.setMyCommands([
     { command: "start", description: "🏠 Main menu" },
+    { command: "volume", description: "📦 Volume packages & pricing" },
     { command: "lookup", description: "🔍 Look up a token (address or name)" },
     { command: "order", description: "📋 Your latest order status" },
     { command: "latest", description: "📰 Latest boosted tokens" },
@@ -1017,6 +1261,10 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     );
 
     await sendMainMenu(msg.chat.id, userId);
+  });
+
+  bot.onText(/^\/volume/, async (msg) => {
+    await sendMsg(bot, msg.chat.id, volumePackagesText(), { reply_markup: KB_PACKAGES_START() });
   });
 
   bot.onText(/^\/lookup(?:@\w+)?(?:\s+(.+))?$/, async (msg, match) => {
@@ -1049,7 +1297,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     await sendMsg(
       bot,
       msg.chat.id,
-      `🦅 DexBoost — Help\n\n/start — 🏠 Main menu\n/lookup <CA or name> — 🔍 Token lookup (multi-source)\n/order — 📋 Your latest order status\n/latest · /top · /golden — 📰 DexScreener boost feeds\n/chains — 🌐 Supported chains\n/cancel — ❌ Cancel current action\n\n💳 Payments are verified on-chain. Orders are valid for ${payment.orderExpiryHours}h.\n\n⚠️ This bot never asks for seed phrases, private keys, or passwords. No legitimate service does — never share them with anyone.`,
+      `🦅 DexBoost — Help\n\n/start — 🏠 Main menu\n/volume — 📦 View all volume packages\n/lookup <CA or name> — 🔍 Token lookup (multi-source)\n/order — 📋 Your latest order status\n/latest · /top · /golden — 📰 DexScreener boost feeds\n/chains — 🌐 Supported chains\n/cancel — ❌ Cancel current action\n\nQuick Start:\n1. Tap "🚀 Start Volume Bot"\n2. Paste your token contract address\n3. Choose a package\n4. Send payment → auto-confirmed on-chain\n\n🔒 Lock Supply & 🔥 Burn Token are in the main menu — you sign via a secure link with YOUR wallet.\n\n💳 Payments are verified on-chain. Orders are valid for ${payment.orderExpiryHours}h.\n\n⚠️ This bot never asks for seed phrases, private keys, or passwords. No legitimate service does — never share them with anyone.`,
       { reply_markup: KB_BACK_MAIN() },
     );
   });
@@ -1291,6 +1539,49 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
       return;
     }
 
+    // Lock: custom percentage
+    if (session.step === "lock_custom_pct" && draftToken) {
+      const pct = parseFloat(msg.text);
+      if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
+        await bot.sendMessage(chatId, "❌ Enter a percentage between 1 and 100 (e.g., 60)", {
+          reply_markup: KB_CANCEL(),
+        });
+        return;
+      }
+      await setSession(userId, { step: "lock_duration", draft: { ...draft, pct } });
+      await sendLockDuration(chatId, draftToken as unknown as TokenInfo);
+      return;
+    }
+
+    // Lock: custom duration
+    if (session.step === "lock_custom_dur" && draftToken) {
+      const dur = msg.text.trim();
+      if (!dur) {
+        await bot.sendMessage(chatId, "❌ Please enter a valid duration (e.g., 2 years, 90 days)", {
+          reply_markup: KB_CANCEL(),
+        });
+        return;
+      }
+      const pct = Number(draft.pct ?? 0);
+      await setSession(userId, { step: "lock_summary", draft: { ...draft, duration: dur } });
+      await sendLockSummary(chatId, draftToken as unknown as TokenInfo, pct, dur);
+      return;
+    }
+
+    // Burn: custom percentage
+    if (session.step === "burn_custom_pct" && draftToken) {
+      const pct = parseFloat(msg.text);
+      if (!Number.isFinite(pct) || pct <= 0 || pct > 100) {
+        await bot.sendMessage(chatId, "❌ Enter a percentage between 1 and 100 (e.g., 50)", {
+          reply_markup: KB_CANCEL(),
+        });
+        return;
+      }
+      await setSession(userId, { step: "burn_summary", draft: { ...draft, pct } });
+      await sendBurnSummary(chatId, draftToken as unknown as TokenInfo, pct);
+      return;
+    }
+
     // Generic lookup shortcut (no active flow)
     if (session.step === "awaiting_ca") {
       const t = await runVerify(chatId, userId, msg.text, session.chainHint);
@@ -1339,10 +1630,70 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
 
     if (data === "vol_start") {
       await setSession(userId, { step: "awaiting_ca", draft: { service: "volume" } });
-      await sendMsg(
+      await sendPhoto(
         bot,
         chatId,
-        `📦 Volume Packages — Step 1/3\n\nSend your token contract address (CA):\n\n• Solana: 32–44 Base58\n• EVM: 0x + 40 hex\n• TON: EQ/UQ + 46 chars\n\n⚡ Auto-verified against 7 data sources.`,
+        IMG_LOGO,
+        `🚀 Volume Bot — Whale Attraction Protocol\n\n📊 Progress: 33%\n${progressBar(33)}\nStep 1/3: Token Verification\n\n🌐 Supported Chains:\n⊙ SOL • Ξ ETH • ⬡ BNB • 🔷 Base • 💎 TON\n\n📍 Enter Your Token Contract Address:\n\n📋 Supported formats:\n• Solana: 32-44 chars (Base58)\n• EVM (ETH/BSC/Base): 0x + 40 hex\n• TON: EQ/UQ + 46 chars`,
+        { reply_markup: KB_CANCEL() },
+      );
+      return;
+    }
+
+    if (data === "vol_stop") {
+      const orders = await orderStore.listForUser(userId, 5);
+      const active = orders.find(
+        (o) => o.service === "volume" && (o.status === "awaiting_payment" || o.status === "paid"),
+      );
+      if (active) {
+        await sendMsg(
+          bot,
+          chatId,
+          `◼️ Active Volume Bot\n\n${orderCard(active)}\n\nManage it below:`,
+          {
+            reply_markup: kb([
+              ...(active.status === "awaiting_payment"
+                ? ([[{ text: "🚫 Cancel Order", callback_data: "cancel_order" }]] as Btn[][])
+                : []),
+              [{ text: "⬅️ Back to Main", callback_data: "back_main" }],
+            ]),
+          },
+        );
+      } else {
+        await sendMsg(
+          bot,
+          chatId,
+          `◼️ No Active Volume Bot\n\nNo volume generation is running. Use "🚀 Start Volume Bot" to begin!`,
+          { reply_markup: KB_BACK_MAIN() },
+        );
+      }
+      return;
+    }
+
+    if (data === "volume_packages") {
+      await sendMsg(bot, chatId, volumePackagesText(), { reply_markup: KB_PACKAGES_START() });
+      return;
+    }
+
+    if (data === "lock_supply") {
+      await setSession(userId, { step: "awaiting_ca", draft: { service: "lock_supply" } });
+      await sendPhoto(
+        bot,
+        chatId,
+        IMG_LOCKER,
+        `🔒 Lock Supply\n\n📍 Step 1/3: Token Contract Address\n\nPlease provide your token's contract address (CA):\n\n📋 Supported formats:\n• ⊙ Solana: 32-44 Base58 chars\n• Ξ ETH / ⬡ BSC / 🔷 Base: 0x + 40 hex\n• 💎 TON: EQ/UQ + 46 chars`,
+        { reply_markup: KB_CANCEL() },
+      );
+      return;
+    }
+
+    if (data === "burn_token") {
+      await setSession(userId, { step: "awaiting_ca", draft: { service: "burn" } });
+      await sendPhoto(
+        bot,
+        chatId,
+        IMG_BURNER,
+        `🔥 Burn Token\n\n📍 Step 1/3: Token Contract Address\n\nPlease provide your token's contract address (CA):\n\n📋 Supported formats:\n• ⊙ Solana: 32-44 Base58 chars\n• Ξ ETH / ⬡ BSC / 🔷 Base: 0x + 40 hex\n• 💎 TON: EQ/UQ + 46 chars`,
         { reply_markup: KB_CANCEL() },
       );
       return;
@@ -1418,22 +1769,114 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
       return;
     }
 
-    // Package selection (volume flow)
-    if (data.startsWith("pkg_") && draftToken) {
+    // Package selection — works in two contexts:
+    //  a) inside the flow (token already verified) → create the order
+    //  b) from the "📦 Volume Packages" menu (no token yet) → start the flow
+    if (data.startsWith("pkg_") && (!service || service === "volume")) {
       const pkgId = data.slice(4);
       if (pkgId === "custom") {
-        await setSession(userId, { step: "custom_amount", draft });
-        await sendMsg(
-          bot,
-          chatId,
-          `🎯 Custom package\n\nEnter the amount of ${currencyForChain(draftToken.chainId)} you want to spend (e.g. 3.5).\n• 50,000 volume per 1 native token`,
-          { reply_markup: KB_CANCEL() },
-        );
+        if (draftToken) {
+          await setSession(userId, { step: "custom_amount", draft });
+          await sendMsg(
+            bot,
+            chatId,
+            `🎯 Custom package\n\nEnter the amount of ${currencyForChain(draftToken.chainId)} you want to spend (e.g. 3.5).\n• 50,000 volume per 1 native token`,
+            { reply_markup: KB_CANCEL() },
+          );
+        } else {
+          await setSession(userId, { step: "awaiting_ca", draft: { service: "volume", packageId: "custom" } });
+          await sendPhoto(
+            bot,
+            chatId,
+            IMG_LOGO,
+            `🚀 Volume Bot — Custom Package\n\n📊 Progress: 33%\n${progressBar(33)}\nStep 1/3: Token Verification\n\n📍 Enter Your Token Contract Address:`,
+            { reply_markup: KB_CANCEL() },
+          );
+        }
         return;
       }
       const pkg = PACKAGES.find((p) => p.id === pkgId);
-      if (pkg) {
+      if (!pkg) return;
+      if (draftToken) {
         await createVolumeOrder(chatId, userId, pkg, draftToken as unknown as TokenInfo);
+        return;
+      }
+      await setSession(userId, { step: "awaiting_ca", draft: { service: "volume", packageId: pkg.id } });
+      await sendPhoto(
+        bot,
+        chatId,
+        IMG_LOGO,
+        `🚀 Volume Bot — ${pkg.emoji} ${pkg.name}\n\n📊 Progress: 33%\n${progressBar(33)}\nStep 1/3: Token Verification\n\n📍 Enter Your Token Contract Address:`,
+        { reply_markup: KB_CANCEL() },
+      );
+      return;
+    }
+
+    // ── Lock Supply steps ──────────────────────────────────────────────────
+    if (data.startsWith("lock_pct_") && draftToken) {
+      const raw = data.slice("lock_pct_".length);
+      if (raw === "custom") {
+        await setSession(userId, { step: "lock_custom_pct", draft });
+        await bot.sendMessage(chatId, "✏️ Enter the custom percentage to lock (1–100):", {
+          reply_markup: KB_CANCEL(),
+        });
+        return;
+      }
+      const pct = parseInt(raw, 10);
+      await setSession(userId, { step: "lock_duration", draft: { ...draft, pct } });
+      await sendLockDuration(chatId, draftToken as unknown as TokenInfo);
+      return;
+    }
+
+    if (data.startsWith("lock_dur_") && draftToken) {
+      const raw = data.slice("lock_dur_".length);
+      const pct = Number(draft.pct ?? 0);
+      if (raw === "custom") {
+        await setSession(userId, { step: "lock_custom_dur", draft });
+        await bot.sendMessage(chatId, "✏️ Enter the custom lock duration (e.g., '90 days', '2 years'):", {
+          reply_markup: KB_CANCEL(),
+        });
+        return;
+      }
+      const durMap: Record<string, string> = { "1m": "1 month", "3m": "3 months", "6m": "6 months", "1y": "1 year" };
+      await setSession(userId, { step: "lock_summary", draft: { ...draft, duration: durMap[raw] ?? raw } });
+      await sendLockSummary(chatId, draftToken as unknown as TokenInfo, pct, durMap[raw] ?? raw);
+      return;
+    }
+
+    // ── Burn Token steps ───────────────────────────────────────────────────
+    if (data.startsWith("burn_pct_") && draftToken) {
+      const raw = data.slice("burn_pct_".length);
+      if (raw === "custom") {
+        await setSession(userId, { step: "burn_custom_pct", draft });
+        await bot.sendMessage(chatId, "✏️ Enter the custom percentage to burn (1–100):", {
+          reply_markup: KB_CANCEL(),
+        });
+        return;
+      }
+      const pct = parseInt(raw, 10);
+      await setSession(userId, { step: "burn_summary", draft: { ...draft, pct } });
+      await sendBurnSummary(chatId, draftToken as unknown as TokenInfo, pct);
+      return;
+    }
+
+    // ── Connect Wallet (lock/burn final step) — REAL & safe ────────────────
+    if (data === "connect_wallet" && draftToken) {
+      const svc = service === "burn" ? "burn" : "lock_supply";
+      const t = draftToken as unknown as TokenInfo;
+      const pct = Number(draft.pct ?? 0);
+      if (svc === "burn") {
+        await createLockBurnRequest(chatId, userId, "burn", t, { "Target %": `${pct}%` }, `Burn ${pct}%`);
+      } else {
+        const dur = String(draft.duration ?? "—");
+        await createLockBurnRequest(
+          chatId,
+          userId,
+          "lock_supply",
+          t,
+          { "Target %": `${pct}%`, Duration: dur },
+          `Lock ${pct}% · ${dur}`,
+        );
       }
       return;
     }
