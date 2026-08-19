@@ -2014,10 +2014,31 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
   });
 
   // ── Error handling & lifecycle ─────────────────────────────────────────────
+  let lastConflictAlertAt = 0;
   bot.on("polling_error", (err) => {
     pollErrorCount += 1;
     setBotStatus({ lastError: String(err), pollErrors: pollErrorCount });
     botLog.error({ err }, "Telegram polling error");
+
+    // 409 "terminated by other getUpdates request" means ANOTHER instance is
+    // polling with the same bot token (duplicate Render/Replit deployment).
+    // That makes the bot appear dead on this instance — alert the admin
+    // immediately (at most once every 10 minutes).
+    const msg = String(err);
+    if (/409|terminated by other getUpdates/i.test(msg)) {
+      const now = Date.now();
+      if (now - lastConflictAlertAt > 10 * 60_000) {
+        lastConflictAlertAt = now;
+        void notifyAdmin(
+          `⚠️ *DUPLICATE BOT INSTANCE DETECTED*\n\n` +
+            `Another service is polling Telegram with the SAME bot token.\n` +
+            `This instance gets kicked out of polling and the bot looks dead.\n\n` +
+            `👉 Fix: delete or suspend every OTHER deployment of this bot\n` +
+            `(old Render services, Replit deployments) so only ONE runs.\n\n` +
+            `Error: ${esc(msg)}`,
+        );
+      }
+    }
   });
   bot.on("webhook_error", (err) => {
     setBotStatus({ lastError: String(err) });

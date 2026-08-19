@@ -1,24 +1,41 @@
 # Render.com — DexBoost (Telegram bot + token growth services)
 # ---------------------------------------------------------------------------
-# NOTE: the FREE plan sleeps after ~15 min without traffic. The user is
-# keeping the bot awake with an external UptimeRobot monitor pinging
-# /api/healthz every 5 minutes — that's the intended pairing for this file.
+# ⚠️ READ THIS BEFORE DEPLOYING AGAIN:
 #
-# How the sleep/wake cycle is handled:
+# 1. ONLY ONE INSTANCE MAY RUN AT A TIME. A second deployment with the same
+#    TELEGRAM_BOT_TOKEN causes Telegram "409: terminated by other getUpdates"
+#    conflicts and the bot looks dead. Delete/suspend every OTHER service
+#    (and any Replit deployment) that uses this token.
+#
+# 2. If you deploy via "Apply Blueprint" and it creates a NEW service
+#    (URL like my-boss-1ddj.onrender.com), the OLD service must be deleted —
+#    otherwise you now have two bots fighting (see #1).
+#
+# 3. SLEEP: the FREE plan sleeps after ~15 min without external traffic.
+#    Two fixes, pick one:
+#      a) `plan: starter` below ($7/mo, NEVER sleeps) ← the reliable fix
+#      b) stay free + external UptimeRobot monitor pinging
+#         https://<YOUR-URL>/api/healthz every 5 minutes
+#    The in-app keep-alive cannot wake a slept instance.
+#
+# 4. For the wallet-signing feature, set APP_URL (this service's public URL)
+#    and LOCK_VAULT_WALLET (a Solana wallet you control) in the dashboard.
+#
+# The sleep/wake cycle, when it happens:
 #   - On wake, the payment watcher immediately runs a catch-up tick, so a
 #     deposit made while asleep is detected within one poll after wake.
 #   - Orders persist in Postgres (DATABASE_URL — use a FREE Neon database;
 #     Render's own free Postgres expires after 30 days) or, without it, in a
 #     JSON file under ./data (survives restarts, NOT deploys).
 #   - Expect ~20-60s cold-start latency on wake; that's inherent to free.
-#   - For $7/mo, change `plan` to `starter` and drop the UptimeRobot crutch.
 
 services:
   - type: web
     name: dexscreener-boost-bot
     env: node
     region: oregon
-    plan: free               # ← free tier + external cron (UptimeRobot)
+    plan: starter            # ← $7/mo: never sleeps. Switch back to "free"
+                             #   only if you pair it with UptimeRobot.
     buildCommand: npm install -g pnpm@10.26.1 && pnpm install --frozen-lockfile && pnpm --filter @workspace/api-server run build
     startCommand: node --enable-source-maps artifacts/api-server/dist/index.mjs
     healthCheckPath: /api/healthz

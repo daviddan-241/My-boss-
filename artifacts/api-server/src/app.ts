@@ -45,6 +45,20 @@ app.get("/signing", (_req, res) => {
   res.sendFile(path.join(PUBLIC_DIR, "signing.html"));
 });
 
+// Root route: the platform's "primary URL" check hits this — return a
+// friendly JSON payload instead of a 404.
+app.get("/", (_req, res) => {
+  res.json({
+    service: "DexBoost",
+    status: "ok",
+    endpoints: {
+      health: "/api/healthz",
+      botStatus: "/api/health/bot",
+      signing: "/signing",
+    },
+  });
+});
+
 app.use("/api", router);
 
 export default app;
