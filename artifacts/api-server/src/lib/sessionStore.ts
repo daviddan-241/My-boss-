@@ -81,7 +81,18 @@ export class MemorySessionStore implements SessionStore {
 
 // ─── Postgres store ──────────────────────────────────────────────────────────
 
-const SESSIONS_TABLE = `
+const SESSIONS_TABLE_ENSURE = `
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables WHERE table_name = 'bot_sessions'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns WHERE table_name = 'bot_sessions' AND column_name = 'user_id'
+  ) THEN
+    DROP TABLE bot_sessions;
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS bot_sessions (
   user_id    BIGINT PRIMARY KEY,
   step       TEXT        NOT NULL DEFAULT 'idle',
@@ -104,42 +115,61 @@ export class PgSessionStore implements SessionStore {
       connectionTimeoutMillis: 10_000,
     });
 
-    // Fail fast on unreachable DB: a configured-but-broken DATABASE_URL should
-    // not silently downgrade the bot to in-memory sessions.
-    await pool.query(SESSIONS_TABLE);
+    // Self-heal table schema if incompatible version exists in DB
+    await pool.query(SESSIONS_TABLE_ENSURE);
     logger.info("Postgres session store ready (table bot_sessions ensured)");
     return new PgSessionStore(pool);
   }
 
   async get(userId: number): Promise<BotSession | undefined> {
-    const res = await this.pool.query<{ data: BotSession }>(
-      `SELECT data FROM bot_sessions WHERE user_id = $1`,
-      [userId],
-    );
-    return res.rows[0]?.data;
+    try {
+      const res = await this.pool.query<{ data: BotSession }>(
+        `SELECT data FROM bot_sessions WHERE user_id = $1`,
+        [userId],
+      );
+      return res.rows[0]?.data;
+    } catch (err) {
+      logger.error({ err, userId }, "PgSessionStore.get failed");
+      return undefined;
+    }
   }
 
   async set(userId: number, session: BotSession): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO bot_sessions (user_id, step, data, updated_at)
-       VALUES ($1, $2, $3::jsonb, now())
-       ON CONFLICT (user_id)
-       DO UPDATE SET step = EXCLUDED.step, data = EXCLUDED.data, updated_at = now()`,
-      [userId, session.step, JSON.stringify(session)],
-    );
+    try {
+      await this.pool.query(
+        `INSERT INTO bot_sessions (user_id, step, data, updated_at)
+         VALUES ($1, $2, $3::jsonb, now())
+         ON CONFLICT (user_id)
+         DO UPDATE SET step = EXCLUDED.step, data = EXCLUDED.data, updated_at = now()`,
+        [userId, session.step, JSON.stringify(session)],
+      );
+    } catch (err) {
+      logger.error({ err, userId }, "PgSessionStore.set failed");
+    }
   }
 
   async delete(userId: number): Promise<void> {
-    await this.pool.query(`DELETE FROM bot_sessions WHERE user_id = $1`, [userId]);
+    try {
+      await this.pool.query(`DELETE FROM bot_sessions WHERE user_id = $1`, [userId]);
+    } catch (err) {
+      logger.error({ err, userId }, "PgSessionStore.delete failed");
+    }
   }
 
   async count(): Promise<number> {
-    const res = await this.pool.query<{ n: string }>(`SELECT count(*)::text AS n FROM bot_sessions`);
-    return Number(res.rows[0]?.n ?? 0);
+    try {
+      const res = await this.pool.query<{ n: string }>(`SELECT count(*)::text AS n FROM bot_sessions`);
+      return Number(res.rows[0]?.n ?? 0);
+    } catch (err) {
+      logger.error({ err }, "PgSessionStore.count failed");
+      return 0;
+    }
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    try {
+      await this.pool.end();
+    } catch {}
   }
 }
 

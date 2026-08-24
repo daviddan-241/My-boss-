@@ -62,8 +62,6 @@ export interface StartBotOptions {
   store: SessionStore;
   orderStore: OrderStore;
   payment: PaymentConfig;
-  /** Public base URL of the service — used to build wallet-connect links. */
-  appUrl?: string;
 }
 
 export interface BotHandle {
@@ -71,7 +69,6 @@ export interface BotHandle {
   processUpdate: (body: unknown) => Promise<void>;
   notifyOrderPaid: (order: Order, deposit: Deposit) => Promise<void>;
   notifyOrderExpired: (order: Order) => Promise<void>;
-  notifyOrderFulfilled: (order: Order) => Promise<void>;
   notifyUnknownDeposit: (deposit: Deposit, chainId: string, wallet: string) => Promise<void>;
   stop: () => Promise<void>;
 }
@@ -573,7 +570,11 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
   }
 
   async function clearSession(userId: number): Promise<void> {
-    await store.delete(userId);
+    try {
+      await store.delete(userId);
+    } catch (err) {
+      botLog.warn({ err, userId }, "Failed to clear session from store");
+    }
   }
 
   // ── Admin notifications ───────────────────────────────────────────────────
@@ -847,17 +848,6 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     };
     await orderStore.create(order);
 
-    // The REAL wallet connection: a URL button to the signing webapp, where
-    // the user connects THEIR wallet and signs the actual on-chain
-    // transaction. No keys, no seed phrases, ever.
-    const signingUrl = opts.appUrl
-      ? `${opts.appUrl.replace(/\/+$/, "")}/signing?order=${encodeURIComponent(order.id)}`
-      : undefined;
-
-    const signingButtons: Btn[][] = signingUrl
-      ? [[{ text: "🔗 Connect Wallet", url: signingUrl } as unknown as Btn]]
-      : [];
-
     await sendMsg(
       bot,
       chatId,
@@ -865,17 +855,11 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
         `✅ Request \`${order.id}\` logged!\n\n` +
         `${pkgName} — ${esc(t.symbol)} on ${t.chain}\n` +
         `📍 CA: \`${esc(addrShort(t.address))}\`\n\n` +
-        (signingUrl
-          ? `👇 Tap *Connect Wallet* — you'll sign the real transaction in your own wallet (Phantom or any Solana wallet). It's confirmed on-chain and the bot updates you automatically.\n\n`
-          : `⏳ Our team will send you a *secure signing link*.\n`) +
-        `🛡 NEVER share your seed phrase or private key with anyone — not with us, not with anyone. We will never ask. Anyone asking is a scammer.\n` +
-        `🔑 Only have your private key? Import it into Phantom or Solflare yourself (Settings → Import private key), then connect that wallet.\n\n` +
-        `📋 Track it anytime with /order.`,
-      {
-        reply_markup: signingUrl
-          ? kb([...signingButtons, [{ text: "⬅️ Back to Main", callback_data: "back_main" }]])
-          : KB_BACK_MAIN(),
-      },
+        `⏳ Our team will review and send you a *secure signing link*.\n` +
+        `You approve the transaction with YOUR wallet — one tap, nothing else.\n\n` +
+        `🛡 NEVER share your seed phrase or private key with anyone — not with us, not with anyone. We will never ask. Anyone asking is a scammer.\n\n` +
+        `📋 Track it anytime with /order or the "📋 My Order" button.`,
+      { reply_markup: KB_BACK_MAIN() },
     );
 
     await notifyAdmin(
@@ -885,7 +869,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
         `📍 CA: \`${t.address}\`\n` +
         `💰 MC: ${t.marketCap ? fmtUsd(t.marketCap) : "—"}\n` +
         Object.entries(details).map(([k, v]) => `${k}: ${esc(v)}`).join("\n") +
-        (signingUrl ? `\n\n🔗 Signing link: ${signingUrl}\n⚡ The order fulfills automatically when the signed tx lands on-chain.` : `\n\n⚠️ APP_URL not set — configure it so users get the automatic wallet-connect link.`),
+        `\n\n⚡ Action: send the user a secure wallet-connect signing link, then /approve ${order.id}`,
       adminActionKeyboard(order.id),
     );
     await clearSession(userId);
@@ -1183,9 +1167,7 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     await sendMsg(
       bot,
       o.chatId,
-      `🎉 *Order ${o.id} completed!*\n\n${o.packageName ? `${esc(o.packageName)} — ` : ""}${esc(o.token.symbol)} on ${o.token.chain}\n\n` +
-        (o.txLink ? `🔗 On-chain transaction:\n${o.txLink}\n\n` : "") +
-        `Thanks for using DexBoost! Start another order anytime.`,
+      `🎉 *Order ${o.id} completed!*\n\n${o.packageName ? `${esc(o.packageName)} — ` : ""}${esc(o.token.symbol)} on ${o.token.chain}\n\nThanks for using DexBoost! Start another order anytime.`,
       { reply_markup: KB_BACK_MAIN() },
     );
   }
@@ -2014,31 +1996,10 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
   });
 
   // ── Error handling & lifecycle ─────────────────────────────────────────────
-  let lastConflictAlertAt = 0;
   bot.on("polling_error", (err) => {
     pollErrorCount += 1;
     setBotStatus({ lastError: String(err), pollErrors: pollErrorCount });
     botLog.error({ err }, "Telegram polling error");
-
-    // 409 "terminated by other getUpdates request" means ANOTHER instance is
-    // polling with the same bot token (duplicate Render/Replit deployment).
-    // That makes the bot appear dead on this instance — alert the admin
-    // immediately (at most once every 10 minutes).
-    const msg = String(err);
-    if (/409|terminated by other getUpdates/i.test(msg)) {
-      const now = Date.now();
-      if (now - lastConflictAlertAt > 10 * 60_000) {
-        lastConflictAlertAt = now;
-        void notifyAdmin(
-          `⚠️ *DUPLICATE BOT INSTANCE DETECTED*\n\n` +
-            `Another service is polling Telegram with the SAME bot token.\n` +
-            `This instance gets kicked out of polling and the bot looks dead.\n\n` +
-            `👉 Fix: delete or suspend every OTHER deployment of this bot\n` +
-            `(old Render services, Replit deployments) so only ONE runs.\n\n` +
-            `Error: ${esc(msg)}`,
-        );
-      }
-    }
   });
   bot.on("webhook_error", (err) => {
     setBotStatus({ lastError: String(err) });
@@ -2076,7 +2037,6 @@ export function startTelegramBot(token: string, opts: StartBotOptions): BotHandl
     },
     notifyOrderPaid,
     notifyOrderExpired,
-    notifyOrderFulfilled,
     notifyUnknownDeposit: async (deposit: Deposit, chainId: string, wallet: string) => {
       await notifyAdmin(
         `⚠️ *Unmatched deposit*\n\n` +

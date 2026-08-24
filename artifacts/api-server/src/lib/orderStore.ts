@@ -231,7 +231,18 @@ export class FileOrderStore implements OrderStore {
 
 // ─── Postgres store ───────────────────────────────────────────────────────────
 
-const ORDERS_TABLE = `
+const ORDERS_TABLE_ENSURE = `
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM information_schema.tables WHERE table_name = 'orders'
+  ) AND NOT EXISTS (
+    SELECT 1 FROM information_schema.columns WHERE table_name = 'orders' AND column_name = 'user_id'
+  ) THEN
+    DROP TABLE orders;
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS orders (
   id         TEXT PRIMARY KEY,
   user_id    BIGINT NOT NULL,
@@ -254,62 +265,93 @@ export class PgOrderStore implements OrderStore {
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: 10_000,
     });
-    await pool.query(ORDERS_TABLE);
+    await pool.query(ORDERS_TABLE_ENSURE);
     logger.info("Postgres order store ready (table orders ensured)");
     return new PgOrderStore(pool);
   }
 
   async create(order: Order): Promise<void> {
-    await this.pool.query(
-      `INSERT INTO orders (id, user_id, status, data, created_at, updated_at)
-       VALUES ($1, $2, $3, $4::jsonb, $5, $6)
-       ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
-      [order.id, order.userId, order.status, JSON.stringify(order), order.createdAt, Date.now()],
-    );
+    try {
+      await this.pool.query(
+        `INSERT INTO orders (id, user_id, status, data, created_at, updated_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6)
+         ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, status = EXCLUDED.status, updated_at = EXCLUDED.updated_at`,
+        [order.id, order.userId, order.status, JSON.stringify(order), order.createdAt, Date.now()],
+      );
+    } catch (err) {
+      logger.error({ err, orderId: order.id }, "PgOrderStore.create failed");
+    }
   }
 
   async get(id: string): Promise<Order | undefined> {
-    const res = await this.pool.query<{ data: Order }>(`SELECT data FROM orders WHERE id = $1`, [id]);
-    return res.rows[0]?.data;
+    try {
+      const res = await this.pool.query<{ data: Order }>(`SELECT data FROM orders WHERE id = $1`, [id]);
+      return res.rows[0]?.data;
+    } catch (err) {
+      logger.error({ err, orderId: id }, "PgOrderStore.get failed");
+      return undefined;
+    }
   }
 
   async update(id: string, patch: Partial<Order>): Promise<Order | undefined> {
     const current = await this.get(id);
     if (!current) return undefined;
     const next = { ...current, ...patch };
-    await this.pool.query(
-      `UPDATE orders SET data = $2::jsonb, status = $3, updated_at = $4 WHERE id = $1`,
-      [id, JSON.stringify(next), next.status, Date.now()],
-    );
-    return next;
+    try {
+      await this.pool.query(
+        `UPDATE orders SET data = $2::jsonb, status = $3, updated_at = $4 WHERE id = $1`,
+        [id, JSON.stringify(next), next.status, Date.now()],
+      );
+      return next;
+    } catch (err) {
+      logger.error({ err, orderId: id }, "PgOrderStore.update failed");
+      return current;
+    }
   }
 
   async listByStatus(status: OrderStatus): Promise<Order[]> {
-    const res = await this.pool.query<{ data: Order }>(
-      `SELECT data FROM orders WHERE status = $1 ORDER BY created_at ASC`,
-      [status],
-    );
-    return res.rows.map((r) => r.data);
+    try {
+      const res = await this.pool.query<{ data: Order }>(
+        `SELECT data FROM orders WHERE status = $1 ORDER BY created_at ASC`,
+        [status],
+      );
+      return res.rows.map((r) => r.data);
+    } catch (err) {
+      logger.error({ err, status }, "PgOrderStore.listByStatus failed");
+      return [];
+    }
   }
 
   async listForUser(userId: number, limit = 10): Promise<Order[]> {
-    const res = await this.pool.query<{ data: Order }>(
-      `SELECT data FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`,
-      [userId, limit],
-    );
-    return res.rows.map((r) => r.data);
+    try {
+      const res = await this.pool.query<{ data: Order }>(
+        `SELECT data FROM orders WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2`,
+        [userId, limit],
+      );
+      return res.rows.map((r) => r.data);
+    } catch (err) {
+      logger.error({ err, userId }, "PgOrderStore.listForUser failed");
+      return [];
+    }
   }
 
   async listRecent(limit = 10): Promise<Order[]> {
-    const res = await this.pool.query<{ data: Order }>(
-      `SELECT data FROM orders ORDER BY created_at DESC LIMIT $1`,
-      [limit],
-    );
-    return res.rows.map((r) => r.data);
+    try {
+      const res = await this.pool.query<{ data: Order }>(
+        `SELECT data FROM orders ORDER BY created_at DESC LIMIT $1`,
+        [limit],
+      );
+      return res.rows.map((r) => r.data);
+    } catch (err) {
+      logger.error({ err }, "PgOrderStore.listRecent failed");
+      return [];
+    }
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    try {
+      await this.pool.end();
+    } catch {}
   }
 }
 
